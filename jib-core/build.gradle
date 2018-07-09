@@ -4,6 +4,7 @@ plugins {
     id 'com.github.sherter.google-java-format' version '0.7.1'
     id 'net.ltgt.apt' version '0.13'
     id 'net.ltgt.errorprone' version '0.0.13'
+    id 'osgi'
 }
 
 group 'com.google.cloud.tools'
@@ -51,6 +52,12 @@ dependencies {
 jar {
     manifest {
         attributes 'Implementation-Version': version
+        
+        // OSGi metadata
+        symbolicName 'com.google.cloud.tools.jib'
+		vendor 'Google LLC'
+        docURL 'https://github.com/GoogleContainerTools/jib/wiki'
+        license 'https://www.apache.org/licenses/LICENSE-2.0'
     }
 }
 
