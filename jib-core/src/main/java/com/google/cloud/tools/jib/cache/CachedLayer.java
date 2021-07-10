@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,55 +16,104 @@
 
 package com.google.cloud.tools.jib.cache;
 
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import com.google.cloud.tools.jib.blob.Blob;
 import com.google.cloud.tools.jib.blob.BlobDescriptor;
-import com.google.cloud.tools.jib.blob.Blobs;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
 import com.google.cloud.tools.jib.image.Layer;
-import java.nio.file.Path;
+import com.google.common.base.Preconditions;
+import javax.annotation.Nullable;
 
-/**
- * A {@link Layer} that has been written out to a cache and has its file-backed content BLOB,
- * digest, size, and diff ID.
- */
+/** A reference to an image layer that is in the Cache. */
 public class CachedLayer implements Layer {
 
-  private final Path contentFile;
-  private final BlobDescriptor blobDescriptor;
-  private final DescriptorDigest diffId;
+  /** Builds a {@link CachedLayer}. */
+  public static class Builder {
 
-  /**
-   * Initializes the layer with its file-backed content BLOB, content descriptor (digest and size),
-   * and diff ID. The {@code blobDescriptor} and {@code diffId} <b>must match</b> the BLOB stored in
-   * the file - no checks are made at runtime.
-   *
-   * @param contentFile the file with the layer's content BLOB
-   * @param blobDescriptor the content descriptor for the layer's content BLOB
-   * @param diffId the diff ID for the layer
-   * @see Layer
-   */
-  public CachedLayer(Path contentFile, BlobDescriptor blobDescriptor, DescriptorDigest diffId) {
-    this.contentFile = contentFile;
-    this.blobDescriptor = blobDescriptor;
-    this.diffId = diffId;
+    @Nullable private DescriptorDigest layerDigest;
+    @Nullable private DescriptorDigest layerDiffId;
+    private long layerSize = -1;
+    @Nullable private Blob layerBlob;
+
+    private Builder() {}
+
+    public Builder setLayerDigest(DescriptorDigest layerDigest) {
+      this.layerDigest = layerDigest;
+      return this;
+    }
+
+    public Builder setLayerDiffId(DescriptorDigest layerDiffId) {
+      this.layerDiffId = layerDiffId;
+      return this;
+    }
+
+    public Builder setLayerSize(long layerSize) {
+      this.layerSize = layerSize;
+      return this;
+    }
+
+    public Builder setLayerBlob(Blob layerBlob) {
+      this.layerBlob = layerBlob;
+      return this;
+    }
+
+    boolean hasLayerBlob() {
+      return layerBlob != null;
+    }
+
+    /**
+     * Creates a CachedLayer instance.
+     *
+     * @return a new cached layer
+     */
+    public CachedLayer build() {
+      return new CachedLayer(
+          Preconditions.checkNotNull(layerDigest, "layerDigest required"),
+          Preconditions.checkNotNull(layerDiffId, "layerDiffId required"),
+          layerSize,
+          Preconditions.checkNotNull(layerBlob, "layerBlob required"));
+    }
   }
 
-  public Path getContentFile() {
-    return contentFile;
+  /**
+   * Creates a new {@link Builder} for a {@link CachedLayer}.
+   *
+   * @return the new {@link Builder}
+   */
+  public static Builder builder() {
+    return new Builder();
+  }
+
+  private final DescriptorDigest layerDiffId;
+  private final BlobDescriptor blobDescriptor;
+  private final Blob layerBlob;
+
+  private CachedLayer(
+      DescriptorDigest layerDigest, DescriptorDigest layerDiffId, long layerSize, Blob layerBlob) {
+    this.layerDiffId = layerDiffId;
+    this.layerBlob = layerBlob;
+    this.blobDescriptor = new BlobDescriptor(layerSize, layerDigest);
+  }
+
+  public DescriptorDigest getDigest() {
+    return blobDescriptor.getDigest();
+  }
+
+  public long getSize() {
+    return blobDescriptor.getSize();
+  }
+
+  @Override
+  public DescriptorDigest getDiffId() {
+    return layerDiffId;
   }
 
   @Override
   public Blob getBlob() {
-    return Blobs.from(contentFile);
+    return layerBlob;
   }
 
   @Override
   public BlobDescriptor getBlobDescriptor() {
     return blobDescriptor;
-  }
-
-  @Override
-  public DescriptorDigest getDiffId() {
-    return diffId;
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,13 +16,14 @@
 
 package com.google.cloud.tools.jib.registry;
 
+import com.google.cloud.tools.jib.api.RegistryException;
 import javax.annotation.Nullable;
 
 /**
  * Thrown when an HTTP request to a registry endpoint failed with errors as defined in {@link
  * ErrorCodes}.
  */
-public class RegistryErrorException extends RegistryException {
+class RegistryErrorException extends RegistryException {
 
   RegistryErrorException(String message, @Nullable Throwable cause) {
     super(message, cause);

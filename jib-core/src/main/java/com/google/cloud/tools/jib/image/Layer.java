@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,6 +16,7 @@
 
 package com.google.cloud.tools.jib.image;
 
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import com.google.cloud.tools.jib.blob.Blob;
 import com.google.cloud.tools.jib.blob.BlobDescriptor;
 
@@ -51,18 +52,25 @@ import com.google.cloud.tools.jib.blob.BlobDescriptor;
 public interface Layer {
 
   /**
+   * Returns this layer's contents.
+   *
    * @return the layer's content BLOB
    * @throws LayerPropertyNotFoundException if not available
    */
   Blob getBlob() throws LayerPropertyNotFoundException;
 
+  // TODO: Remove this
   /**
+   * Returns this layer's content descriptor.
+   *
    * @return the layer's content {@link BlobDescriptor}
    * @throws LayerPropertyNotFoundException if not available
    */
   BlobDescriptor getBlobDescriptor() throws LayerPropertyNotFoundException;
 
   /**
+   * Returns this layer's diff ID.
+   *
    * @return the layer's diff ID
    * @throws LayerPropertyNotFoundException if not available
    */

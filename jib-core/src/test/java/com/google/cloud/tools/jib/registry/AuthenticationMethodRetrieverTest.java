@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -18,12 +18,15 @@ package com.google.cloud.tools.jib.registry;
 
 import com.google.api.client.http.HttpHeaders;
 import com.google.api.client.http.HttpMethods;
-import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpStatusCodes;
+import com.google.cloud.tools.jib.http.FailoverHttpClient;
 import com.google.cloud.tools.jib.http.Response;
+import com.google.cloud.tools.jib.http.ResponseException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.Collections;
 import org.hamcrest.CoreMatchers;
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -35,13 +38,15 @@ import org.mockito.junit.MockitoJUnitRunner;
 @RunWith(MockitoJUnitRunner.class)
 public class AuthenticationMethodRetrieverTest {
 
-  @Mock private HttpResponseException mockHttpResponseException;
+  @Mock private ResponseException mockResponseException;
   @Mock private HttpHeaders mockHeaders;
+  @Mock private FailoverHttpClient httpClient;
 
   private final RegistryEndpointRequestProperties fakeRegistryEndpointRequestProperties =
       new RegistryEndpointRequestProperties("someServerUrl", "someImageName");
   private final AuthenticationMethodRetriever testAuthenticationMethodRetriever =
-      new AuthenticationMethodRetriever(fakeRegistryEndpointRequestProperties);
+      new AuthenticationMethodRetriever(
+          fakeRegistryEndpointRequestProperties, "user-agent", httpClient);
 
   @Test
   public void testGetContent() {
@@ -55,8 +60,8 @@ public class AuthenticationMethodRetrieverTest {
 
   @Test
   public void testHandleResponse() {
-    Assert.assertNull(
-        testAuthenticationMethodRetriever.handleResponse(Mockito.mock(Response.class)));
+    Assert.assertFalse(
+        testAuthenticationMethodRetriever.handleResponse(Mockito.mock(Response.class)).isPresent());
   }
 
   @Test
@@ -80,53 +85,52 @@ public class AuthenticationMethodRetrieverTest {
 
   @Test
   public void testHandleHttpResponseException_invalidStatusCode() throws RegistryErrorException {
-    Mockito.when(mockHttpResponseException.getStatusCode()).thenReturn(-1);
+    Mockito.when(mockResponseException.getStatusCode()).thenReturn(-1);
 
     try {
-      testAuthenticationMethodRetriever.handleHttpResponseException(mockHttpResponseException);
+      testAuthenticationMethodRetriever.handleHttpResponseException(mockResponseException);
       Assert.fail(
           "Authentication method retriever should only handle HTTP 401 Unauthorized errors");
 
-    } catch (HttpResponseException ex) {
-      Assert.assertEquals(mockHttpResponseException, ex);
+    } catch (ResponseException ex) {
+      Assert.assertEquals(mockResponseException, ex);
     }
   }
 
   @Test
-  public void tsetHandleHttpResponseException_noHeader() throws HttpResponseException {
-    Mockito.when(mockHttpResponseException.getStatusCode())
+  public void testHandleHttpResponseException_noHeader() throws ResponseException {
+    Mockito.when(mockResponseException.getStatusCode())
         .thenReturn(HttpStatusCodes.STATUS_CODE_UNAUTHORIZED);
-    Mockito.when(mockHttpResponseException.getHeaders()).thenReturn(mockHeaders);
+    Mockito.when(mockResponseException.getHeaders()).thenReturn(mockHeaders);
     Mockito.when(mockHeaders.getAuthenticate()).thenReturn(null);
 
     try {
-      testAuthenticationMethodRetriever.handleHttpResponseException(mockHttpResponseException);
+      testAuthenticationMethodRetriever.handleHttpResponseException(mockResponseException);
       Assert.fail(
           "Authentication method retriever should fail if 'WWW-Authenticate' header is not found");
 
     } catch (RegistryErrorException ex) {
-      Assert.assertThat(
+      MatcherAssert.assertThat(
           ex.getMessage(), CoreMatchers.containsString("'WWW-Authenticate' header not found"));
     }
   }
 
   @Test
-  public void testHandleHttpResponseException_badAuthenticationMethod()
-      throws HttpResponseException {
+  public void testHandleHttpResponseException_badAuthenticationMethod() throws ResponseException {
     String authenticationMethod = "bad authentication method";
 
-    Mockito.when(mockHttpResponseException.getStatusCode())
+    Mockito.when(mockResponseException.getStatusCode())
         .thenReturn(HttpStatusCodes.STATUS_CODE_UNAUTHORIZED);
-    Mockito.when(mockHttpResponseException.getHeaders()).thenReturn(mockHeaders);
+    Mockito.when(mockResponseException.getHeaders()).thenReturn(mockHeaders);
     Mockito.when(mockHeaders.getAuthenticate()).thenReturn(authenticationMethod);
 
     try {
-      testAuthenticationMethodRetriever.handleHttpResponseException(mockHttpResponseException);
+      testAuthenticationMethodRetriever.handleHttpResponseException(mockResponseException);
       Assert.fail(
           "Authentication method retriever should fail if 'WWW-Authenticate' header failed to parse");
 
     } catch (RegistryErrorException ex) {
-      Assert.assertThat(
+      MatcherAssert.assertThat(
           ex.getMessage(),
           CoreMatchers.containsString(
               "Failed get authentication method from 'WWW-Authenticate' header"));
@@ -135,20 +139,21 @@ public class AuthenticationMethodRetrieverTest {
 
   @Test
   public void testHandleHttpResponseException_pass()
-      throws RegistryErrorException, HttpResponseException, MalformedURLException {
+      throws RegistryErrorException, ResponseException, MalformedURLException {
     String authenticationMethod =
         "Bearer realm=\"https://somerealm\",service=\"someservice\",scope=\"somescope\"";
 
-    Mockito.when(mockHttpResponseException.getStatusCode())
+    Mockito.when(mockResponseException.getStatusCode())
         .thenReturn(HttpStatusCodes.STATUS_CODE_UNAUTHORIZED);
-    Mockito.when(mockHttpResponseException.getHeaders()).thenReturn(mockHeaders);
+    Mockito.when(mockResponseException.getHeaders()).thenReturn(mockHeaders);
     Mockito.when(mockHeaders.getAuthenticate()).thenReturn(authenticationMethod);
 
     RegistryAuthenticator registryAuthenticator =
-        testAuthenticationMethodRetriever.handleHttpResponseException(mockHttpResponseException);
+        testAuthenticationMethodRetriever.handleHttpResponseException(mockResponseException).get();
 
     Assert.assertEquals(
         new URL("https://somerealm?service=someservice&scope=repository:someImageName:someScope"),
-        registryAuthenticator.getAuthenticationUrl("someScope"));
+        registryAuthenticator.getAuthenticationUrl(
+            null, Collections.singletonMap("someImageName", "someScope")));
   }
 }

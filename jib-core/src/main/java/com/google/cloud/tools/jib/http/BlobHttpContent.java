@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -20,16 +20,30 @@ import com.google.api.client.http.HttpContent;
 import com.google.cloud.tools.jib.blob.Blob;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.function.Consumer;
 
 /** {@link Blob}-backed {@link HttpContent}. */
 public class BlobHttpContent implements HttpContent {
 
   private final Blob blob;
   private final String contentType;
+  private final Consumer<Long> writtenByteCountListener;
 
   public BlobHttpContent(Blob blob, String contentType) {
+    this(blob, contentType, ignored -> {});
+  }
+
+  /**
+   * Create a new BlobHttpClient.
+   *
+   * @param blob a blob to wrap
+   * @param contentType the http contentType descriptor
+   * @param writtenByteCountListener to listen for written byte feedback
+   */
+  public BlobHttpContent(Blob blob, String contentType, Consumer<Long> writtenByteCountListener) {
     this.blob = blob;
     this.contentType = contentType;
+    this.writtenByteCountListener = writtenByteCountListener;
   }
 
   @Override
@@ -50,7 +64,7 @@ public class BlobHttpContent implements HttpContent {
 
   @Override
   public void writeTo(OutputStream outputStream) throws IOException {
-    blob.writeTo(outputStream);
+    blob.writeTo(new NotifyingOutputStream(outputStream, writtenByteCountListener));
     outputStream.flush();
   }
 }

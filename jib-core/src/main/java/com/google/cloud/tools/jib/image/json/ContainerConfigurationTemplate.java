@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,16 +17,12 @@
 package com.google.cloud.tools.jib.image.json;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import com.google.cloud.tools.jib.json.JsonTemplate;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableSortedMap;
+import com.google.common.base.Preconditions;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.SortedMap;
 import javax.annotation.Nullable;
 
 /**
@@ -42,9 +38,32 @@ import javax.annotation.Nullable;
  *   "config": {
  *     "Env": ["/usr/bin/java"],
  *     "Entrypoint": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"],
- *     "Cmd": ["arg1", "arg2"]
- *     "ExposedPorts": { "6000/tcp":{}, "8000/tcp":{}, "9000/tcp":{} }
+ *     "Cmd": ["arg1", "arg2"],
+ *     "Healthcheck": {
+ *       "Test": ["CMD-SHELL", "/usr/bin/check-health localhost"],
+ *       "Interval": 30000000000,
+ *       "Timeout": 10000000000,
+ *       "StartPeriod": 0,
+ *       "Retries": 3
+ *     }
+ *     "ExposedPorts": { "6000/tcp":{}, "8000/tcp":{}, "9000/tcp":{} },
+ *     "Volumes":{"/var/job-result-data":{},"/var/log/my-app-logs":{}}},
+ *     "Labels": { "com.example.label": "value" },
+ *     "WorkingDir": "/home/user/workspace",
+ *     "User": "me"
  *   },
+ *   "history": [
+ *     {
+ *       "author": "Jib",
+ *       "created": "1970-01-01T00:00:00Z",
+ *       "created_by": "jib"
+ *     },
+ *     {
+ *       "author": "Jib",
+ *       "created": "1970-01-01T00:00:00Z",
+ *       "created_by": "jib"
+ *     }
+ *   ]
  *   "rootfs": {
  *     "diff_ids": [
  *       "sha256:2aebd096e0e237b447781353379722157e6c2d434b9ec5a0d63f2a6f07cf90c2",
@@ -61,14 +80,8 @@ import javax.annotation.Nullable;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class ContainerConfigurationTemplate implements JsonTemplate {
 
-  /**
-   * A combined date and time at which the image was created. Constant to maintain reproducibility
-   * and avoid Docker's weird "292 years old" bug.
-   *
-   * @see <a
-   *     href="https://github.com/GoogleContainerTools/jib/issues/341">https://github.com/GoogleContainerTools/jib/issues/341</a>
-   */
-  private String created = "1970-01-01T00:00:00Z";
+  /** ISO-8601 formatted combined date and time at which the image was created. */
+  @Nullable private String created;
 
   /** The CPU architecture to run the binaries in this container. */
   private String architecture = "amd64";
@@ -78,6 +91,9 @@ public class ContainerConfigurationTemplate implements JsonTemplate {
 
   /** Execution parameters that should be used as a base when running the container. */
   private final ConfigurationObjectTemplate config = new ConfigurationObjectTemplate();
+
+  /** Describes the history of each layer. */
+  private final List<HistoryEntry> history = new ArrayList<>();
 
   /** Layer content digests that are used to build the container filesystem. */
   private final RootFilesystemObjectTemplate rootfs = new RootFilesystemObjectTemplate();
@@ -95,8 +111,44 @@ public class ContainerConfigurationTemplate implements JsonTemplate {
     /** Arguments to pass into main. */
     @Nullable private List<String> Cmd;
 
+    /** Healthcheck. */
+    @Nullable private HealthCheckObjectTemplate Healthcheck;
+
     /** Network ports the container exposes. */
-    @Nullable private SortedMap<String, Map<?, ?>> ExposedPorts;
+    @Nullable private Map<String, Map<?, ?>> ExposedPorts;
+
+    /** Labels. */
+    @Nullable private Map<String, String> Labels;
+
+    /** Working directory. */
+    @Nullable private String WorkingDir;
+
+    /** User. */
+    @Nullable private String User;
+
+    /** Volumes. */
+    @Nullable private Map<String, Map<?, ?>> Volumes;
+  }
+
+  /** Template for inner JSON object representing the healthcheck configuration. */
+  private static class HealthCheckObjectTemplate implements JsonTemplate {
+
+    /** The test to perform to check that the container is healthy. */
+    @Nullable private List<String> Test;
+
+    /** Number of nanoseconds to wait between probe attempts. */
+    @Nullable private Long Interval;
+
+    /** Number of nanoseconds to wait before considering the check to have hung. */
+    @Nullable private Long Timeout;
+
+    /**
+     * Number of nanoseconds to wait for the container to initialize before starting health-retries.
+     */
+    @Nullable private Long StartPeriod;
+
+    /** The number of consecutive failures needed to consider the container as unhealthy. */
+    @Nullable private Integer Retries;
   }
 
   /**
@@ -106,6 +158,7 @@ public class ContainerConfigurationTemplate implements JsonTemplate {
   private static class RootFilesystemObjectTemplate implements JsonTemplate {
 
     /** The type must always be {@code "layers"}. */
+    @SuppressWarnings("unused")
     private final String type = "layers";
 
     /**
@@ -115,34 +168,165 @@ public class ContainerConfigurationTemplate implements JsonTemplate {
     private final List<DescriptorDigest> diff_ids = new ArrayList<>();
   }
 
-  public void setContainerEnvironment(List<String> environment) {
+  public void setCreated(@Nullable String created) {
+    this.created = created;
+  }
+
+  /**
+   * Sets the architecture for which this container was built. See the <a
+   * href="https://github.com/opencontainers/image-spec/blob/master/config.md#properties">OCI Image
+   * Configuration specification</a> for acceptable values.
+   *
+   * @param architecture value for the {@code architecture} field
+   */
+  public void setArchitecture(String architecture) {
+    this.architecture = architecture;
+  }
+
+  /**
+   * Sets the operating system for which this container was built. See the <a
+   * href="https://github.com/opencontainers/image-spec/blob/master/config.md#properties">OCI Image
+   * Configuration specification</a> for acceptable values.
+   *
+   * @param os value for the {@code os} field
+   */
+  public void setOs(String os) {
+    this.os = os;
+  }
+
+  public void setContainerEnvironment(@Nullable List<String> environment) {
     config.Env = environment;
   }
 
-  public void setContainerEntrypoint(List<String> command) {
+  public void setContainerEntrypoint(@Nullable List<String> command) {
     config.Entrypoint = command;
   }
 
-  public void setContainerCmd(List<String> cmd) {
+  public void setContainerCmd(@Nullable List<String> cmd) {
     config.Cmd = cmd;
   }
 
-  public void setContainerExposedPorts(List<String> exposedPorts) {
-    // TODO: Do this conversion somewhere else
-    ImmutableSortedMap.Builder<String, Map<?, ?>> result =
-        new ImmutableSortedMap.Builder<>(String::compareTo);
-    for (String port : exposedPorts) {
-      result.put(port, Collections.emptyMap());
+  /**
+   * Sets test on HealthCheck, creates an empty HealthCheck object if necessary.
+   *
+   * @param test the list of tests to set
+   */
+  public void setContainerHealthCheckTest(List<String> test) {
+    if (config.Healthcheck == null) {
+      config.Healthcheck = new HealthCheckObjectTemplate();
     }
-    config.ExposedPorts = result.build();
+    Preconditions.checkNotNull(config.Healthcheck).Test = test;
+  }
+
+  /**
+   * Sets interval on HealthCheck, creates an empty HealthCheck object if necessary.
+   *
+   * @param interval the interval to set
+   */
+  public void setContainerHealthCheckInterval(@Nullable Long interval) {
+    if (config.Healthcheck == null) {
+      config.Healthcheck = new HealthCheckObjectTemplate();
+    }
+    Preconditions.checkNotNull(config.Healthcheck).Interval = interval;
+  }
+
+  /**
+   * Sets timeout on HealthCheck, creates an empty HealthCheck object if necessary.
+   *
+   * @param timeout the timeout to configure
+   */
+  public void setContainerHealthCheckTimeout(@Nullable Long timeout) {
+    if (config.Healthcheck == null) {
+      config.Healthcheck = new HealthCheckObjectTemplate();
+    }
+    Preconditions.checkNotNull(config.Healthcheck).Timeout = timeout;
+  }
+
+  /**
+   * Sets startPeriod on HealthCheck, creates an empty HealthCheck object if necessary.
+   *
+   * @param startPeriod the start period to configure
+   */
+  public void setContainerHealthCheckStartPeriod(@Nullable Long startPeriod) {
+    if (config.Healthcheck == null) {
+      config.Healthcheck = new HealthCheckObjectTemplate();
+    }
+    Preconditions.checkNotNull(config.Healthcheck).StartPeriod = startPeriod;
+  }
+
+  /**
+   * Sets retries on HealthCheck, creates an empty HealthCheck object if necessary.
+   *
+   * @param retries the number of retries to configure
+   */
+  public void setContainerHealthCheckRetries(@Nullable Integer retries) {
+    if (config.Healthcheck == null) {
+      config.Healthcheck = new HealthCheckObjectTemplate();
+    }
+    Preconditions.checkNotNull(config.Healthcheck).Retries = retries;
+  }
+
+  public void setContainerExposedPorts(@Nullable Map<String, Map<?, ?>> exposedPorts) {
+    config.ExposedPorts = exposedPorts;
+  }
+
+  public void setContainerLabels(@Nullable Map<String, String> labels) {
+    config.Labels = labels;
+  }
+
+  public void setContainerWorkingDir(@Nullable String workingDirectory) {
+    config.WorkingDir = workingDirectory;
+  }
+
+  public void setContainerUser(@Nullable String user) {
+    config.User = user;
+  }
+
+  public void setContainerVolumes(@Nullable Map<String, Map<?, ?>> volumes) {
+    config.Volumes = volumes;
   }
 
   public void addLayerDiffId(DescriptorDigest diffId) {
     rootfs.diff_ids.add(diffId);
   }
 
+  public void addHistoryEntry(HistoryEntry historyEntry) {
+    history.add(historyEntry);
+  }
+
   List<DescriptorDigest> getDiffIds() {
     return rootfs.diff_ids;
+  }
+
+  List<HistoryEntry> getHistory() {
+    return history;
+  }
+
+  @Nullable
+  String getCreated() {
+    return created;
+  }
+
+  /**
+   * Returns the architecture for which this container was built. See the <a
+   * href="https://github.com/opencontainers/image-spec/blob/master/config.md#properties">OCI Image
+   * Configuration specification</a> for acceptable values.
+   *
+   * @return the {@code architecture} field
+   */
+  public String getArchitecture() {
+    return architecture;
+  }
+
+  /**
+   * Returns the operating system for which this container was built. See the <a
+   * href="https://github.com/opencontainers/image-spec/blob/master/config.md#properties">OCI Image
+   * Configuration specification</a> for acceptable values.
+   *
+   * @return the {@code os} field
+   */
+  public String getOs() {
+    return os;
   }
 
   @Nullable
@@ -161,20 +345,60 @@ public class ContainerConfigurationTemplate implements JsonTemplate {
   }
 
   @Nullable
-  ImmutableList<String> getContainerExposedPorts() {
-    // TODO: Do this conversion somewhere else
-    if (config.ExposedPorts == null) {
-      return null;
-    }
-    ImmutableList.Builder<String> ports = new ImmutableList.Builder<>();
-    for (Map.Entry<String, Map<?, ?>> entry : config.ExposedPorts.entrySet()) {
-      ports.add(entry.getKey());
-    }
-    return ports.build();
+  List<String> getContainerHealthTest() {
+    return config.Healthcheck == null ? null : config.Healthcheck.Test;
   }
 
-  @VisibleForTesting
-  DescriptorDigest getLayerDiffId(int index) {
+  @Nullable
+  Long getContainerHealthInterval() {
+    return config.Healthcheck == null ? null : config.Healthcheck.Interval;
+  }
+
+  @Nullable
+  Long getContainerHealthTimeout() {
+    return config.Healthcheck == null ? null : config.Healthcheck.Timeout;
+  }
+
+  @Nullable
+  Long getContainerHealthStartPeriod() {
+    return config.Healthcheck == null ? null : config.Healthcheck.StartPeriod;
+  }
+
+  @Nullable
+  Integer getContainerHealthRetries() {
+    return config.Healthcheck == null ? null : config.Healthcheck.Retries;
+  }
+
+  @Nullable
+  Map<String, Map<?, ?>> getContainerExposedPorts() {
+    return config.ExposedPorts;
+  }
+
+  @Nullable
+  Map<String, String> getContainerLabels() {
+    return config.Labels;
+  }
+
+  @Nullable
+  String getContainerWorkingDir() {
+    return config.WorkingDir;
+  }
+
+  @Nullable
+  String getContainerUser() {
+    return config.User;
+  }
+
+  @Nullable
+  Map<String, Map<?, ?>> getContainerVolumes() {
+    return config.Volumes;
+  }
+
+  public DescriptorDigest getLayerDiffId(int index) {
     return rootfs.diff_ids.get(index);
+  }
+
+  public int getLayerCount() {
+    return rootfs.diff_ids.size();
   }
 }

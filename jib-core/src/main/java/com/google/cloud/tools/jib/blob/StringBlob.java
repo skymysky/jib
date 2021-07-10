@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,13 +16,14 @@
 
 package com.google.cloud.tools.jib.blob;
 
+import com.google.cloud.tools.jib.hash.Digests;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
-/** A {@link Blob} that holds a {@link String}. */
+/** A {@link Blob} that holds a {@link String}. Encodes in UTF-8 when writing in bytes. */
 class StringBlob implements Blob {
 
   private final String content;
@@ -33,9 +34,9 @@ class StringBlob implements Blob {
 
   @Override
   public BlobDescriptor writeTo(OutputStream outputStream) throws IOException {
-    try (InputStream stringInputStream =
+    try (InputStream stringIn =
         new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8))) {
-      return BlobDescriptor.fromPipe(stringInputStream, outputStream);
+      return Digests.computeDigest(stringIn, outputStream);
     }
   }
 }

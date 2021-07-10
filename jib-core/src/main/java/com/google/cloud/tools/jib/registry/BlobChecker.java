@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,27 +17,24 @@
 package com.google.cloud.tools.jib.registry;
 
 import com.google.api.client.http.HttpMethods;
-import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpStatusCodes;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import com.google.cloud.tools.jib.blob.BlobDescriptor;
 import com.google.cloud.tools.jib.http.BlobHttpContent;
 import com.google.cloud.tools.jib.http.Response;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
-import com.google.cloud.tools.jib.json.JsonTemplateMapper;
-import com.google.cloud.tools.jib.registry.json.ErrorEntryTemplate;
-import com.google.cloud.tools.jib.registry.json.ErrorResponseTemplate;
-import java.io.IOException;
+import com.google.cloud.tools.jib.http.ResponseException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import javax.annotation.Nullable;
 
 /**
  * Checks if an image's BLOB exists on a registry, and retrieves its {@link BlobDescriptor} if it
  * exists.
  */
-class BlobChecker implements RegistryEndpointProvider<BlobDescriptor> {
+class BlobChecker implements RegistryEndpointProvider<Optional<BlobDescriptor>> {
 
   private final RegistryEndpointRequestProperties registryEndpointRequestProperties;
   private final DescriptorDigest blobDigest;
@@ -49,9 +46,9 @@ class BlobChecker implements RegistryEndpointProvider<BlobDescriptor> {
     this.blobDigest = blobDigest;
   }
 
-  /** @return the BLOB's content descriptor */
+  /** Returns the BLOB's content descriptor. */
   @Override
-  public BlobDescriptor handleResponse(Response response) throws RegistryErrorException {
+  public Optional<BlobDescriptor> handleResponse(Response response) throws RegistryErrorException {
     long contentLength = response.getContentLength();
     if (contentLength < 0) {
       throw new RegistryErrorExceptionBuilder(getActionDescription())
@@ -59,50 +56,30 @@ class BlobChecker implements RegistryEndpointProvider<BlobDescriptor> {
           .build();
     }
 
-    return new BlobDescriptor(contentLength, blobDigest);
+    return Optional.of(new BlobDescriptor(contentLength, blobDigest));
   }
 
   @Override
-  @Nullable
-  public BlobDescriptor handleHttpResponseException(HttpResponseException httpResponseException)
-      throws RegistryErrorException, HttpResponseException {
-    if (httpResponseException.getStatusCode() != HttpStatusCodes.STATUS_CODE_NOT_FOUND) {
-      throw httpResponseException;
+  public Optional<BlobDescriptor> handleHttpResponseException(ResponseException responseException)
+      throws ResponseException {
+    if (responseException.getStatusCode() != HttpStatusCodes.STATUS_CODE_NOT_FOUND) {
+      throw responseException;
     }
 
-    // Finds a BLOB_UNKNOWN error response code.
-    String errorContent = httpResponseException.getContent();
-    if (errorContent == null) {
+    if (responseException.getContent() == null) {
       // TODO: The Google HTTP client gives null content for HEAD requests. Make the content never
       // be null, even for HEAD requests.
-      return null;
+      return Optional.empty();
+    }
 
-    } else {
-      try {
-        ErrorResponseTemplate errorResponse =
-            JsonTemplateMapper.readJson(errorContent, ErrorResponseTemplate.class);
-        List<ErrorEntryTemplate> errors = errorResponse.getErrors();
-        if (errors.size() == 1) {
-          String errorCodeString = errors.get(0).getCode();
-          if (errorCodeString == null) {
-            // Did not get an error code back.
-            throw httpResponseException;
-          }
-          ErrorCodes errorCode = ErrorCodes.valueOf(errorCodeString);
-          if (errorCode.equals(ErrorCodes.BLOB_UNKNOWN)) {
-            return null;
-          }
-        }
-
-      } catch (IOException ex) {
-        throw new RegistryErrorExceptionBuilder(getActionDescription(), ex)
-            .addReason("Failed to parse registry error response body")
-            .build();
-      }
+    // Find a BLOB_UNKNOWN error response code.
+    ErrorCodes errorCode = ErrorResponseUtil.getErrorCode(responseException);
+    if (errorCode == ErrorCodes.BLOB_UNKNOWN) {
+      return Optional.empty();
     }
 
     // BLOB_UNKNOWN was not found as a error response code.
-    throw httpResponseException;
+    throw responseException;
   }
 
   @Override

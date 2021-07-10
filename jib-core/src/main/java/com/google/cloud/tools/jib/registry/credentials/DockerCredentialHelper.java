@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,16 +17,24 @@
 package com.google.cloud.tools.jib.registry.credentials;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.google.cloud.tools.jib.http.Authorization;
-import com.google.cloud.tools.jib.http.Authorizations;
+import com.google.cloud.tools.jib.api.Credential;
 import com.google.cloud.tools.jib.json.JsonTemplate;
 import com.google.cloud.tools.jib.json.JsonTemplateMapper;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
 import com.google.common.io.CharStreams;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.Properties;
+import java.util.function.Function;
 import javax.annotation.Nullable;
 
 /**
@@ -38,46 +46,93 @@ import javax.annotation.Nullable;
 public class DockerCredentialHelper {
 
   private final String serverUrl;
-  private final String credentialHelperSuffix;
+  private final Path credentialHelper;
+  private final Properties systemProperties;
+  private Function<List<String>, ProcessBuilder> processBuilderFactory;
 
   /** Template for a Docker credential helper output. */
+  @VisibleForTesting
   @JsonIgnoreProperties(ignoreUnknown = true)
-  private static class DockerCredentialsTemplate implements JsonTemplate {
+  static class DockerCredentialsTemplate implements JsonTemplate {
 
-    @Nullable private String Username;
-    @Nullable private String Secret;
+    @Nullable
+    @VisibleForTesting
+    @JsonProperty("Username")
+    String username;
+
+    @Nullable
+    @VisibleForTesting
+    @JsonProperty("Secret")
+    String secret;
   }
 
   /**
-   * Construct with {@link DockerCredentialHelperFactory}.
+   * Constructs a new {@link DockerCredentialHelper}.
    *
    * @param serverUrl the server URL to pass into the credential helper
-   * @param credentialHelperSuffix the credential helper CLI suffix
+   * @param credentialHelper the path to the credential helper executable
    */
-  DockerCredentialHelper(String serverUrl, String credentialHelperSuffix) {
+  public DockerCredentialHelper(String serverUrl, Path credentialHelper) {
+    this(serverUrl, credentialHelper, System.getProperties(), ProcessBuilder::new);
+  }
+
+  @VisibleForTesting
+  DockerCredentialHelper(
+      String serverUrl,
+      Path credentialHelper,
+      Properties systemProperties,
+      Function<List<String>, ProcessBuilder> processBuilderFactory) {
     this.serverUrl = serverUrl;
-    this.credentialHelperSuffix = credentialHelperSuffix;
+    this.credentialHelper = credentialHelper;
+    this.systemProperties = systemProperties;
+    this.processBuilderFactory = processBuilderFactory;
   }
 
   /**
-   * @return the Docker credentials by calling the corresponding CLI.
-   *     <p>The credential helper CLI is called in the form:
-   *     <pre>{@code
+   * Calls the credential helper CLI.
+   *
+   * <p>Calls occur in the form:
+   *
+   * <pre>{@code
    * echo -n <server URL> | docker-credential-<credential helper suffix> get
    * }</pre>
    *
-   * @throws IOException if writing/reading process input/output fails.
-   * @throws NonexistentServerUrlDockerCredentialHelperException if credentials are not found.
-   * @throws NonexistentDockerCredentialHelperException if the credential helper CLI doesn't exist.
+   * @return the Docker credentials by calling the corresponding CLI
+   * @throws IOException if writing/reading process input/output fails
+   * @throws CredentialHelperUnhandledServerUrlException if no credentials could be found for the
+   *     corresponding server
+   * @throws CredentialHelperNotFoundException if the credential helper CLI doesn't exist
    */
-  public Authorization retrieve()
-      throws IOException, NonexistentServerUrlDockerCredentialHelperException,
-          NonexistentDockerCredentialHelperException {
-    try {
-      String credentialHelper = "docker-credential-" + credentialHelperSuffix;
-      String[] credentialHelperCommand = {credentialHelper, "get"};
+  public Credential retrieve()
+      throws IOException, CredentialHelperUnhandledServerUrlException,
+          CredentialHelperNotFoundException {
+    boolean isWindows =
+        systemProperties.getProperty("os.name").toLowerCase(Locale.ENGLISH).contains("windows");
+    String lowerCaseHelper = credentialHelper.toString().toLowerCase(Locale.ENGLISH);
+    if (!isWindows || lowerCaseHelper.endsWith(".cmd") || lowerCaseHelper.endsWith(".exe")) {
+      return retrieve(Arrays.asList(credentialHelper.toString(), "get"));
+    }
 
-      Process process = new ProcessBuilder(credentialHelperCommand).start();
+    // We are on Windows with undefined/unknown file extension.
+    for (String suffix : Arrays.asList(".cmd", ".exe")) {
+      try {
+        return retrieve(Arrays.asList(credentialHelper.toString() + suffix, "get"));
+      } catch (CredentialHelperNotFoundException ignored) {
+        // ignored
+      }
+    }
+    // On Windows, launching a process from Java without a file extension should normally fail
+    // (https://github.com/GoogleContainerTools/jib/issues/2399#issuecomment-612972912), but
+    // running Jib on Linux-like environment (e.g., Cygwin) might succeed?
+    return retrieve(Arrays.asList(credentialHelper.toString(), "get"));
+  }
+
+  private Credential retrieve(List<String> credentialHelperCommand)
+      throws IOException, CredentialHelperUnhandledServerUrlException,
+          CredentialHelperNotFoundException {
+    try {
+      Process process = processBuilderFactory.apply(credentialHelperCommand).start();
+
       try (OutputStream processStdin = process.getOutputStream()) {
         processStdin.write(serverUrl.getBytes(StandardCharsets.UTF_8));
       }
@@ -88,14 +143,14 @@ public class DockerCredentialHelper {
 
         // Throws an exception if the credential store does not have credentials for serverUrl.
         if (output.contains("credentials not found in native keychain")) {
-          throw new NonexistentServerUrlDockerCredentialHelperException(
+          throw new CredentialHelperUnhandledServerUrlException(
               credentialHelper, serverUrl, output);
         }
         if (output.isEmpty()) {
           try (InputStreamReader processStderrReader =
               new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8)) {
             String errorOutput = CharStreams.toString(processStderrReader);
-            throw new NonexistentServerUrlDockerCredentialHelperException(
+            throw new CredentialHelperUnhandledServerUrlException(
                 credentialHelper, serverUrl, errorOutput);
           }
         }
@@ -103,16 +158,16 @@ public class DockerCredentialHelper {
         try {
           DockerCredentialsTemplate dockerCredentials =
               JsonTemplateMapper.readJson(output, DockerCredentialsTemplate.class);
-          if (dockerCredentials.Username == null || dockerCredentials.Secret == null) {
-            throw new NonexistentServerUrlDockerCredentialHelperException(
+          if (Strings.isNullOrEmpty(dockerCredentials.username)
+              || Strings.isNullOrEmpty(dockerCredentials.secret)) {
+            throw new CredentialHelperUnhandledServerUrlException(
                 credentialHelper, serverUrl, output);
           }
 
-          return Authorizations.withBasicCredentials(
-              dockerCredentials.Username, dockerCredentials.Secret);
+          return Credential.from(dockerCredentials.username, dockerCredentials.secret);
 
         } catch (JsonProcessingException ex) {
-          throw new NonexistentServerUrlDockerCredentialHelperException(
+          throw new CredentialHelperUnhandledServerUrlException(
               credentialHelper, serverUrl, output);
         }
       }
@@ -124,11 +179,17 @@ public class DockerCredentialHelper {
 
       // Checks if the failure is due to a nonexistent credential helper CLI.
       if (ex.getMessage().contains("No such file or directory")
-          || ex.getMessage().contains("cannot find the file")) {
-        throw new NonexistentDockerCredentialHelperException(credentialHelperSuffix, ex);
+          || ex.getMessage().contains("cannot find the file")
+          || ex.getMessage().contains("error=2")) /* errno=2 (ENOENT) */ {
+        throw new CredentialHelperNotFoundException(credentialHelper, ex);
       }
 
       throw ex;
     }
+  }
+
+  @VisibleForTesting
+  Path getCredentialHelper() {
+    return credentialHelper;
   }
 }

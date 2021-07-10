@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,117 +16,101 @@
 
 package com.google.cloud.tools.jib.builder.steps;
 
-import com.google.cloud.tools.jib.Timer;
-import com.google.cloud.tools.jib.async.AsyncStep;
-import com.google.cloud.tools.jib.builder.BuildConfiguration;
-import com.google.cloud.tools.jib.builder.SourceFilesConfiguration;
+import com.google.cloud.tools.jib.api.LogEvent;
+import com.google.cloud.tools.jib.api.buildplan.FileEntriesLayer;
+import com.google.cloud.tools.jib.api.buildplan.FileEntry;
+import com.google.cloud.tools.jib.blob.Blob;
+import com.google.cloud.tools.jib.builder.ProgressEventDispatcher;
+import com.google.cloud.tools.jib.builder.TimerEventDispatcher;
 import com.google.cloud.tools.jib.cache.Cache;
-import com.google.cloud.tools.jib.cache.CacheMetadataCorruptedException;
-import com.google.cloud.tools.jib.cache.CacheReader;
-import com.google.cloud.tools.jib.cache.CacheWriter;
-import com.google.cloud.tools.jib.cache.CachedLayerWithMetadata;
+import com.google.cloud.tools.jib.cache.CacheCorruptedException;
+import com.google.cloud.tools.jib.cache.CachedLayer;
+import com.google.cloud.tools.jib.configuration.BuildContext;
+import com.google.cloud.tools.jib.event.EventHandlers;
 import com.google.cloud.tools.jib.image.ReproducibleLayerBuilder;
 import com.google.common.collect.ImmutableList;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
 import java.io.IOException;
-import java.nio.file.Path;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 
 /** Builds and caches application layers. */
-class BuildAndCacheApplicationLayerStep
-    implements AsyncStep<CachedLayerWithMetadata>, Callable<CachedLayerWithMetadata> {
+class BuildAndCacheApplicationLayerStep implements Callable<PreparedLayer> {
 
-  private static final String DESCRIPTION = "Building application layers";
+  @SuppressWarnings("InlineFormatString")
+  private static final String DESCRIPTION = "Building %s layer";
 
   /**
    * Makes a list of {@link BuildAndCacheApplicationLayerStep} for dependencies, resources, and
-   * classes layers.
+   * classes layers. Optionally adds an extra layer if configured to do so.
    */
   static ImmutableList<BuildAndCacheApplicationLayerStep> makeList(
-      ListeningExecutorService listeningExecutorService,
-      BuildConfiguration buildConfiguration,
-      SourceFilesConfiguration sourceFilesConfiguration,
-      Cache cache) {
-    try (Timer ignored = new Timer(buildConfiguration.getBuildLogger(), DESCRIPTION)) {
-      return ImmutableList.of(
-          new BuildAndCacheApplicationLayerStep(
-              "dependencies",
-              listeningExecutorService,
-              buildConfiguration,
-              sourceFilesConfiguration.getDependenciesFiles(),
-              sourceFilesConfiguration.getDependenciesPathOnImage(),
-              cache),
-          new BuildAndCacheApplicationLayerStep(
-              "resources",
-              listeningExecutorService,
-              buildConfiguration,
-              sourceFilesConfiguration.getResourcesFiles(),
-              sourceFilesConfiguration.getResourcesPathOnImage(),
-              cache),
-          new BuildAndCacheApplicationLayerStep(
-              "classes",
-              listeningExecutorService,
-              buildConfiguration,
-              sourceFilesConfiguration.getClassesFiles(),
-              sourceFilesConfiguration.getClassesPathOnImage(),
-              cache));
+      BuildContext buildContext, ProgressEventDispatcher.Factory progressEventDispatcherFactory) {
+    List<FileEntriesLayer> layerConfigurations = buildContext.getLayerConfigurations();
+
+    try (ProgressEventDispatcher progressEventDispatcher =
+            progressEventDispatcherFactory.create(
+                "launching application layer builders", layerConfigurations.size());
+        TimerEventDispatcher ignored =
+            new TimerEventDispatcher(
+                buildContext.getEventHandlers(), "Preparing application layer builders")) {
+      return layerConfigurations
+          .stream()
+          // Skips the layer if empty.
+          .filter(layerConfiguration -> !layerConfiguration.getEntries().isEmpty())
+          .map(
+              layerConfiguration ->
+                  new BuildAndCacheApplicationLayerStep(
+                      buildContext,
+                      progressEventDispatcher.newChildProducer(),
+                      layerConfiguration.getName(),
+                      layerConfiguration))
+          .collect(ImmutableList.toImmutableList());
     }
   }
 
-  private final String layerType;
-  private final BuildConfiguration buildConfiguration;
-  private final ImmutableList<Path> sourceFiles;
-  private final String extractionPath;
-  private final Cache cache;
+  private final BuildContext buildContext;
+  private final ProgressEventDispatcher.Factory progressEventDispatcherFactory;
 
-  private final ListenableFuture<CachedLayerWithMetadata> listenableFuture;
+  private final String layerName;
+  private final FileEntriesLayer layerConfiguration;
 
   private BuildAndCacheApplicationLayerStep(
-      String layerType,
-      ListeningExecutorService listeningExecutorService,
-      BuildConfiguration buildConfiguration,
-      ImmutableList<Path> sourceFiles,
-      String extractionPath,
-      Cache cache) {
-    this.layerType = layerType;
-    this.buildConfiguration = buildConfiguration;
-    this.sourceFiles = sourceFiles;
-    this.extractionPath = extractionPath;
-    this.cache = cache;
-
-    listenableFuture = listeningExecutorService.submit(this);
+      BuildContext buildContext,
+      ProgressEventDispatcher.Factory progressEventDispatcherFactory,
+      String layerName,
+      FileEntriesLayer layerConfiguration) {
+    this.buildContext = buildContext;
+    this.progressEventDispatcherFactory = progressEventDispatcherFactory;
+    this.layerName = layerName;
+    this.layerConfiguration = layerConfiguration;
   }
 
   @Override
-  public ListenableFuture<CachedLayerWithMetadata> getFuture() {
-    return listenableFuture;
-  }
+  public PreparedLayer call() throws IOException, CacheCorruptedException {
+    String description = String.format(DESCRIPTION, layerName);
 
-  @Override
-  public CachedLayerWithMetadata call() throws IOException, CacheMetadataCorruptedException {
-    String description = "Building " + layerType + " layer";
+    EventHandlers eventHandlers = buildContext.getEventHandlers();
+    eventHandlers.dispatch(LogEvent.progress(description + "..."));
 
-    buildConfiguration.getBuildLogger().lifecycle(description + "...");
+    try (ProgressEventDispatcher ignored =
+            progressEventDispatcherFactory.create("building " + layerName + " layer", 1);
+        TimerEventDispatcher ignored2 = new TimerEventDispatcher(eventHandlers, description)) {
+      Cache cache = buildContext.getApplicationLayersCache();
 
-    try (Timer ignored = new Timer(buildConfiguration.getBuildLogger(), description)) {
+      ImmutableList<FileEntry> layerEntries = ImmutableList.copyOf(layerConfiguration.getEntries());
       // Don't build the layer if it exists already.
-      CachedLayerWithMetadata cachedLayer =
-          new CacheReader(cache).getUpToDateLayerBySourceFiles(sourceFiles);
-      if (cachedLayer != null) {
-        return cachedLayer;
+      Optional<CachedLayer> optionalCachedLayer = cache.retrieve(layerEntries);
+      if (optionalCachedLayer.isPresent()) {
+        return new PreparedLayer.Builder(optionalCachedLayer.get()).setName(layerName).build();
       }
 
-      ReproducibleLayerBuilder reproducibleLayerBuilder =
-          new ReproducibleLayerBuilder().addFiles(sourceFiles, extractionPath);
+      Blob layerBlob = new ReproducibleLayerBuilder(layerEntries).build();
+      CachedLayer cachedLayer = cache.writeUncompressedLayer(layerBlob, layerEntries);
 
-      cachedLayer = new CacheWriter(cache).writeLayer(reproducibleLayerBuilder);
+      eventHandlers.dispatch(LogEvent.debug(description + " built " + cachedLayer.getDigest()));
 
-      buildConfiguration
-          .getBuildLogger()
-          .debug(description + " built " + cachedLayer.getBlobDescriptor().getDigest());
-
-      return cachedLayer;
+      return new PreparedLayer.Builder(cachedLayer).setName(layerName).build();
     }
   }
 }

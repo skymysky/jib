@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,38 +16,42 @@
 
 package com.google.cloud.tools.jib.registry;
 
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.api.RegistryException;
+import com.google.cloud.tools.jib.event.EventHandlers;
+import com.google.cloud.tools.jib.http.FailoverHttpClient;
 import com.google.cloud.tools.jib.image.json.V22ManifestTemplate;
 import java.io.IOException;
 import java.security.DigestException;
 import org.junit.Assert;
-import org.junit.ClassRule;
 import org.junit.Test;
 
 /** Integration tests for {@link BlobChecker}. */
 public class BlobCheckerIntegrationTest {
 
-  @ClassRule public static LocalRegistry localRegistry = new LocalRegistry(5000);
+  private final FailoverHttpClient httpClient = new FailoverHttpClient(true, false, ignored -> {});
 
   @Test
   public void testCheck_exists() throws IOException, RegistryException {
     RegistryClient registryClient =
-        RegistryClient.factory("localhost:5000", "busybox").newAllowHttp();
+        RegistryClient.factory(EventHandlers.NONE, "gcr.io", "distroless/base", httpClient)
+            .newRegistryClient();
     V22ManifestTemplate manifestTemplate =
-        registryClient.pullManifest("latest", V22ManifestTemplate.class);
+        registryClient.pullManifest("latest", V22ManifestTemplate.class).getManifest();
     DescriptorDigest blobDigest = manifestTemplate.getLayers().get(0).getDigest();
 
-    Assert.assertEquals(blobDigest, registryClient.checkBlob(blobDigest).getDigest());
+    Assert.assertEquals(blobDigest, registryClient.checkBlob(blobDigest).get().getDigest());
   }
 
   @Test
   public void testCheck_doesNotExist() throws IOException, RegistryException, DigestException {
     RegistryClient registryClient =
-        RegistryClient.factory("localhost:5000", "busybox").newAllowHttp();
+        RegistryClient.factory(EventHandlers.NONE, "gcr.io", "distroless/base", httpClient)
+            .newRegistryClient();
     DescriptorDigest fakeBlobDigest =
         DescriptorDigest.fromHash(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
-    Assert.assertEquals(null, registryClient.checkBlob(fakeBlobDigest));
+    Assert.assertFalse(registryClient.checkBlob(fakeBlobDigest).isPresent());
   }
 }

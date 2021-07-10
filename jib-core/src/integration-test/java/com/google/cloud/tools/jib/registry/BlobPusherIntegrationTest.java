@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,9 +16,12 @@
 
 package com.google.cloud.tools.jib.registry;
 
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.api.RegistryException;
 import com.google.cloud.tools.jib.blob.Blob;
 import com.google.cloud.tools.jib.blob.Blobs;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.event.EventHandlers;
+import com.google.cloud.tools.jib.http.FailoverHttpClient;
 import java.io.IOException;
 import java.security.DigestException;
 import org.junit.Assert;
@@ -28,7 +31,9 @@ import org.junit.Test;
 /** Integration tests for {@link BlobPusher}. */
 public class BlobPusherIntegrationTest {
 
-  @ClassRule public static LocalRegistry localRegistry = new LocalRegistry(5000);
+  @ClassRule public static final LocalRegistry localRegistry = new LocalRegistry(5000);
+
+  private final FailoverHttpClient httpClient = new FailoverHttpClient(true, false, ignored -> {});
 
   @Test
   public void testPush() throws DigestException, IOException, RegistryException {
@@ -39,7 +44,8 @@ public class BlobPusherIntegrationTest {
             "52a9e4d4ba4333ce593707f98564fee1e6d898db0d3602408c0b2a6a424d357c");
 
     RegistryClient registryClient =
-        RegistryClient.factory("localhost:5000", "testimage").newAllowHttp();
-    Assert.assertFalse(registryClient.pushBlob(testBlobDigest, testBlob));
+        RegistryClient.factory(EventHandlers.NONE, "localhost:5000", "testimage", httpClient)
+            .newRegistryClient();
+    Assert.assertFalse(registryClient.pushBlob(testBlobDigest, testBlob, null, ignored -> {}));
   }
 }

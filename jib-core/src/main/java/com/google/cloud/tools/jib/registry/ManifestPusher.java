@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,35 +17,73 @@
 package com.google.cloud.tools.jib.registry;
 
 import com.google.api.client.http.HttpMethods;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.api.LogEvent;
+import com.google.cloud.tools.jib.blob.Blobs;
+import com.google.cloud.tools.jib.event.EventHandlers;
+import com.google.cloud.tools.jib.hash.Digests;
 import com.google.cloud.tools.jib.http.BlobHttpContent;
 import com.google.cloud.tools.jib.http.Response;
-import com.google.cloud.tools.jib.image.json.BuildableManifestTemplate;
-import com.google.cloud.tools.jib.json.JsonTemplateMapper;
+import com.google.cloud.tools.jib.http.ResponseException;
+import com.google.cloud.tools.jib.image.json.ManifestTemplate;
+import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.security.DigestException;
 import java.util.Collections;
 import java.util.List;
+import java.util.StringJoiner;
+import org.apache.http.HttpStatus;
 
 /** Pushes an image's manifest. */
-class ManifestPusher implements RegistryEndpointProvider<Void> {
+class ManifestPusher implements RegistryEndpointProvider<DescriptorDigest> {
+
+  /** Response header containing digest of pushed image. */
+  private static final String RESPONSE_DIGEST_HEADER = "Docker-Content-Digest";
+
+  /**
+   * Makes the warning for when the registry responds with an image digest that is not the expected
+   * digest of the image.
+   *
+   * @param expectedDigest the expected image digest
+   * @param receivedDigests the received image digests
+   * @return the warning message
+   */
+  private static String makeUnexpectedImageDigestWarning(
+      DescriptorDigest expectedDigest, List<String> receivedDigests) {
+    if (receivedDigests.isEmpty()) {
+      return "Expected image digest " + expectedDigest + ", but received none";
+    }
+
+    StringJoiner message =
+        new StringJoiner(", ", "Expected image digest " + expectedDigest + ", but received: ", "");
+    for (String receivedDigest : receivedDigests) {
+      message.add(receivedDigest);
+    }
+    return message.toString();
+  }
 
   private final RegistryEndpointRequestProperties registryEndpointRequestProperties;
-  private final BuildableManifestTemplate manifestTemplate;
+  private final ManifestTemplate manifestTemplate;
   private final String imageTag;
+  private final EventHandlers eventHandlers;
 
   ManifestPusher(
       RegistryEndpointRequestProperties registryEndpointRequestProperties,
-      BuildableManifestTemplate manifestTemplate,
-      String imageTag) {
+      ManifestTemplate manifestTemplate,
+      String imageTag,
+      EventHandlers eventHandlers) {
     this.registryEndpointRequestProperties = registryEndpointRequestProperties;
     this.manifestTemplate = manifestTemplate;
     this.imageTag = imageTag;
+    this.eventHandlers = eventHandlers;
   }
 
   @Override
   public BlobHttpContent getContent() {
+    // TODO: Consider giving progress on manifest push as well?
     return new BlobHttpContent(
-        JsonTemplateMapper.toBlob(manifestTemplate), manifestTemplate.getManifestMediaType());
+        Blobs.from(manifestTemplate), manifestTemplate.getManifestMediaType());
   }
 
   @Override
@@ -54,8 +92,58 @@ class ManifestPusher implements RegistryEndpointProvider<Void> {
   }
 
   @Override
-  public Void handleResponse(Response response) {
-    return null;
+  public DescriptorDigest handleHttpResponseException(ResponseException responseException)
+      throws ResponseException, RegistryErrorException {
+    // docker registry 2.0 and 2.1 returns:
+    //   400 Bad Request
+    //   {"errors":[{"code":"TAG_INVALID","message":"manifest tag did not match URI"}]}
+    // docker registry:2.2 returns:
+    //   400 Bad Request
+    //   {"errors":[{"code":"MANIFEST_INVALID","message":"manifest invalid","detail":{}}]}
+    // quay.io returns:
+    //   415 UNSUPPORTED MEDIA TYPE
+    //   {"errors":[{"code":"MANIFEST_INVALID","detail":
+    //   {"message":"manifest schema version not supported"},"message":"manifest invalid"}]}
+
+    if (responseException.getStatusCode() != HttpStatus.SC_BAD_REQUEST
+        && responseException.getStatusCode() != HttpStatus.SC_UNSUPPORTED_MEDIA_TYPE) {
+      throw responseException;
+    }
+
+    ErrorCodes errorCode = ErrorResponseUtil.getErrorCode(responseException);
+    if (errorCode == ErrorCodes.MANIFEST_INVALID || errorCode == ErrorCodes.TAG_INVALID) {
+      throw new RegistryErrorExceptionBuilder(getActionDescription(), responseException)
+          .addReason(
+              "Registry may not support pushing OCI Manifest or "
+                  + "Docker Image Manifest Version 2, Schema 2")
+          .build();
+    }
+    // rethrow: unhandled error response code.
+    throw responseException;
+  }
+
+  @Override
+  public DescriptorDigest handleResponse(Response response) throws IOException {
+    // Checks if the image digest is as expected.
+    DescriptorDigest expectedDigest = Digests.computeJsonDigest(manifestTemplate);
+
+    List<String> receivedDigests = response.getHeader(RESPONSE_DIGEST_HEADER);
+    if (receivedDigests.size() == 1) {
+      try {
+        DescriptorDigest receivedDigest = DescriptorDigest.fromDigest(receivedDigests.get(0));
+        if (expectedDigest.equals(receivedDigest)) {
+          return expectedDigest;
+        }
+
+      } catch (DigestException ex) {
+        // Invalid digest.
+      }
+    }
+
+    // The received digest is not as expected. Warns about this.
+    eventHandlers.dispatch(
+        LogEvent.warn(makeUnexpectedImageDigestWarning(expectedDigest, receivedDigests)));
+    return expectedDigest;
   }
 
   @Override

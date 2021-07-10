@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,7 +16,6 @@
 
 package com.google.cloud.tools.jib.registry;
 
-import com.google.cloud.tools.jib.ProjectInfo;
 import com.google.cloud.tools.jib.registry.json.ErrorEntryTemplate;
 import javax.annotation.Nullable;
 
@@ -39,33 +38,30 @@ class RegistryErrorExceptionBuilder {
     if (message == null) {
       message = "no details";
     }
+    if (errorCodeString == null) {
+      return "unknown: " + message;
+    }
 
     try {
-      if (errorCodeString == null) {
-        throw new IllegalArgumentException();
+      switch (ErrorCodes.valueOf(errorCodeString)) {
+        case MANIFEST_INVALID:
+        case BLOB_UNKNOWN:
+          return message + " (something went wrong)";
+
+        case MANIFEST_UNKNOWN:
+        case TAG_INVALID:
+        case MANIFEST_UNVERIFIED:
+          return message;
+
+        default:
+          return "other: " + message;
       }
-
-      ErrorCodes errorCode = ErrorCodes.valueOf(errorCodeString);
-
-      if (errorCode == ErrorCodes.MANIFEST_INVALID || errorCode == ErrorCodes.BLOB_UNKNOWN) {
-        return message + " (something went wrong)";
-
-      } else if (errorCode == ErrorCodes.MANIFEST_UNKNOWN
-          || errorCode == ErrorCodes.TAG_INVALID
-          || errorCode == ErrorCodes.MANIFEST_UNVERIFIED) {
-        return message;
-
-      } else {
-        return "other: " + message;
-      }
-
     } catch (IllegalArgumentException ex) {
-      // Unknown errorCodeString
-      return "unknown: " + message;
+      return "unknown error code: " + errorCodeString + " (" + message + ")";
     }
   }
 
-  /** @param method the registry method that errored */
+  /** Creates a new builder with information about the method that errored. */
   RegistryErrorExceptionBuilder(String method, @Nullable Throwable cause) {
     this.cause = cause;
 
@@ -74,7 +70,7 @@ class RegistryErrorExceptionBuilder {
     errorMessageBuilder.append(" but failed because: ");
   }
 
-  /** @param method the registry method that errored */
+  /** Creates a new builder with information about the method that errored. */
   RegistryErrorExceptionBuilder(String method) {
     this(method, null);
   }
@@ -102,9 +98,6 @@ class RegistryErrorExceptionBuilder {
   }
 
   RegistryErrorException build() {
-    // Provides a feedback channel.
-    errorMessageBuilder.append(
-        " | If this is a bug, please file an issue at " + ProjectInfo.GITHUB_NEW_ISSUE_URL);
     return new RegistryErrorException(errorMessageBuilder.toString(), cause);
   }
 }

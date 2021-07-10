@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,129 +16,162 @@
 
 package com.google.cloud.tools.jib.builder.steps;
 
-import com.google.cloud.tools.jib.Timer;
-import com.google.cloud.tools.jib.async.AsyncStep;
-import com.google.cloud.tools.jib.async.NonBlockingSteps;
-import com.google.cloud.tools.jib.builder.BuildConfiguration;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.api.LogEvent;
+import com.google.cloud.tools.jib.api.RegistryException;
+import com.google.cloud.tools.jib.blob.BlobDescriptor;
+import com.google.cloud.tools.jib.builder.ProgressEventDispatcher;
+import com.google.cloud.tools.jib.builder.TimerEventDispatcher;
+import com.google.cloud.tools.jib.configuration.BuildContext;
+import com.google.cloud.tools.jib.event.EventHandlers;
+import com.google.cloud.tools.jib.global.JibSystemProperties;
+import com.google.cloud.tools.jib.hash.Digests;
+import com.google.cloud.tools.jib.image.Image;
 import com.google.cloud.tools.jib.image.json.BuildableManifestTemplate;
 import com.google.cloud.tools.jib.image.json.ImageToJsonTranslator;
+import com.google.cloud.tools.jib.image.json.ManifestTemplate;
 import com.google.cloud.tools.jib.registry.RegistryClient;
-import com.google.cloud.tools.jib.registry.RegistryException;
 import com.google.common.collect.ImmutableList;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 
-/** Pushes the final image. */
-class PushImageStep implements AsyncStep<Void>, Callable<Void> {
+/**
+ * Pushes a manifest or a manifest list for a tag. If not a manifest list, returns the manifest
+ * digest ("image digest") and the container configuration digest ("image id") as {@link
+ * BuildResult}. If a manifest list, returns the manifest list digest only.
+ */
+// TODO: figure out the right return value and type when pushing a manifest list.
+class PushImageStep implements Callable<BuildResult> {
 
-  private static final String DESCRIPTION = "Pushing new image";
+  private static final String DESCRIPTION = "Pushing manifest";
 
-  private final BuildConfiguration buildConfiguration;
-  private final AuthenticatePushStep authenticatePushStep;
+  static ImmutableList<PushImageStep> makeList(
+      BuildContext buildContext,
+      ProgressEventDispatcher.Factory progressEventDispatcherFactory,
+      RegistryClient registryClient,
+      BlobDescriptor containerConfigurationDigestAndSize,
+      Image builtImage,
+      boolean manifestAlreadyExists)
+      throws IOException {
+    boolean singlePlatform = buildContext.getContainerConfiguration().getPlatforms().size() == 1;
+    Set<String> tags = buildContext.getAllTargetImageTags();
+    int numPushers = singlePlatform ? tags.size() : 1;
 
-  private final PushLayersStep pushBaseImageLayersStep;
-  private final PushLayersStep pushApplicationLayersStep;
-  private final PushContainerConfigurationStep pushContainerConfigurationStep;
-  private final BuildImageStep buildImageStep;
+    EventHandlers eventHandlers = buildContext.getEventHandlers();
+    try (TimerEventDispatcher ignored =
+            new TimerEventDispatcher(eventHandlers, "Preparing manifest pushers");
+        ProgressEventDispatcher progressDispatcher =
+            progressEventDispatcherFactory.create("launching manifest pushers", numPushers)) {
 
-  private final ListeningExecutorService listeningExecutorService;
-  private final ListenableFuture<Void> listenableFuture;
+      if (JibSystemProperties.skipExistingImages() && manifestAlreadyExists) {
+        eventHandlers.dispatch(LogEvent.info("Skipping pushing manifest; already exists."));
+        return ImmutableList.of();
+      }
+
+      // Gets the image manifest to push.
+      BuildableManifestTemplate manifestTemplate =
+          new ImageToJsonTranslator(builtImage)
+              .getManifestTemplate(
+                  buildContext.getTargetFormat(), containerConfigurationDigestAndSize);
+
+      DescriptorDigest manifestDigest = Digests.computeJsonDigest(manifestTemplate);
+
+      Set<String> imageQualifiers =
+          singlePlatform ? tags : Collections.singleton(manifestDigest.toString());
+      return imageQualifiers
+          .stream()
+          .map(
+              qualifier ->
+                  new PushImageStep(
+                      buildContext,
+                      progressDispatcher.newChildProducer(),
+                      registryClient,
+                      manifestTemplate,
+                      qualifier,
+                      manifestDigest,
+                      containerConfigurationDigestAndSize.getDigest()))
+          .collect(ImmutableList.toImmutableList());
+    }
+  }
+
+  static ImmutableList<PushImageStep> makeListForManifestList(
+      BuildContext buildContext,
+      ProgressEventDispatcher.Factory progressEventDispatcherFactory,
+      RegistryClient registryClient,
+      ManifestTemplate manifestList,
+      boolean manifestListAlreadyExists)
+      throws IOException {
+    Set<String> tags = buildContext.getAllTargetImageTags();
+
+    EventHandlers eventHandlers = buildContext.getEventHandlers();
+    try (TimerEventDispatcher ignored =
+            new TimerEventDispatcher(eventHandlers, "Preparing manifest list pushers");
+        ProgressEventDispatcher progressEventDispatcher =
+            progressEventDispatcherFactory.create("launching manifest list pushers", tags.size())) {
+      boolean singlePlatform = buildContext.getContainerConfiguration().getPlatforms().size() == 1;
+      if (singlePlatform) {
+        return ImmutableList.of(); // single image; no need to push a manifest list
+      }
+
+      if (JibSystemProperties.skipExistingImages() && manifestListAlreadyExists) {
+        eventHandlers.dispatch(LogEvent.info("Skipping pushing manifest list; already exists."));
+        return ImmutableList.of();
+      }
+      DescriptorDigest manifestListDigest = Digests.computeJsonDigest(manifestList);
+      return tags.stream()
+          .map(
+              tag ->
+                  new PushImageStep(
+                      buildContext,
+                      progressEventDispatcher.newChildProducer(),
+                      registryClient,
+                      manifestList,
+                      tag,
+                      manifestListDigest,
+                      // TODO: a manifest list digest isn't an "image id". Figure out the right
+                      // return value and type.
+                      manifestListDigest))
+          .collect(ImmutableList.toImmutableList());
+    }
+  }
+
+  private final BuildContext buildContext;
+  private final ProgressEventDispatcher.Factory progressEventDispatcherFactory;
+  private final RegistryClient registryClient;
+  private final ManifestTemplate manifestTemplate;
+  private final String imageQualifier;
+  private final DescriptorDigest imageDigest;
+  private final DescriptorDigest imageId;
 
   PushImageStep(
-      ListeningExecutorService listeningExecutorService,
-      BuildConfiguration buildConfiguration,
-      AuthenticatePushStep authenticatePushStep,
-      PushLayersStep pushBaseImageLayersStep,
-      PushLayersStep pushApplicationLayersStep,
-      PushContainerConfigurationStep pushContainerConfigurationStep,
-      BuildImageStep buildImageStep) {
-    this.listeningExecutorService = listeningExecutorService;
-    this.buildConfiguration = buildConfiguration;
-    this.authenticatePushStep = authenticatePushStep;
-
-    this.pushBaseImageLayersStep = pushBaseImageLayersStep;
-    this.pushApplicationLayersStep = pushApplicationLayersStep;
-    this.pushContainerConfigurationStep = pushContainerConfigurationStep;
-    this.buildImageStep = buildImageStep;
-
-    listenableFuture =
-        Futures.whenAllSucceed(
-                pushBaseImageLayersStep.getFuture(),
-                pushApplicationLayersStep.getFuture(),
-                pushContainerConfigurationStep.getFuture())
-            .call(this, listeningExecutorService);
+      BuildContext buildContext,
+      ProgressEventDispatcher.Factory progressEventDispatcherFactory,
+      RegistryClient registryClient,
+      ManifestTemplate manifestTemplate,
+      String imageQualifier,
+      DescriptorDigest imageDigest,
+      DescriptorDigest imageId) {
+    this.buildContext = buildContext;
+    this.progressEventDispatcherFactory = progressEventDispatcherFactory;
+    this.registryClient = registryClient;
+    this.manifestTemplate = manifestTemplate;
+    this.imageQualifier = imageQualifier;
+    this.imageDigest = imageDigest;
+    this.imageId = imageId;
   }
 
   @Override
-  public ListenableFuture<Void> getFuture() {
-    return listenableFuture;
-  }
+  public BuildResult call() throws IOException, RegistryException {
+    EventHandlers eventHandlers = buildContext.getEventHandlers();
+    try (TimerEventDispatcher ignored = new TimerEventDispatcher(eventHandlers, DESCRIPTION);
+        ProgressEventDispatcher ignored2 =
+            progressEventDispatcherFactory.create("pushing manifest for " + imageQualifier, 1)) {
+      eventHandlers.dispatch(LogEvent.info("Pushing manifest for " + imageQualifier + "..."));
 
-  @Override
-  public Void call() throws ExecutionException, InterruptedException {
-    ImmutableList.Builder<ListenableFuture<?>> dependenciesBuilder = ImmutableList.builder();
-    dependenciesBuilder.add(authenticatePushStep.getFuture());
-    for (AsyncStep<PushBlobStep> pushBlobStepStep : NonBlockingSteps.get(pushBaseImageLayersStep)) {
-      dependenciesBuilder.add(pushBlobStepStep.getFuture());
+      registryClient.pushManifest(manifestTemplate, imageQualifier);
+      return new BuildResult(imageDigest, imageId);
     }
-    for (AsyncStep<PushBlobStep> pushBlobStepStep :
-        NonBlockingSteps.get(pushApplicationLayersStep)) {
-      dependenciesBuilder.add(pushBlobStepStep.getFuture());
-    }
-    dependenciesBuilder.add(NonBlockingSteps.get(pushContainerConfigurationStep).getFuture());
-    dependenciesBuilder.add(NonBlockingSteps.get(buildImageStep).getFuture());
-    return Futures.whenAllSucceed(dependenciesBuilder.build())
-        .call(this::afterPushSteps, listeningExecutorService)
-        .get()
-        .get();
-  }
-
-  private ListenableFuture<Void> afterPushSteps() throws ExecutionException {
-    List<ListenableFuture<?>> dependencies = new ArrayList<>();
-    for (AsyncStep<PushBlobStep> pushBlobStepStep : NonBlockingSteps.get(pushBaseImageLayersStep)) {
-      dependencies.add(NonBlockingSteps.get(pushBlobStepStep).getFuture());
-    }
-    for (AsyncStep<PushBlobStep> pushBlobStepStep :
-        NonBlockingSteps.get(pushApplicationLayersStep)) {
-      dependencies.add(NonBlockingSteps.get(pushBlobStepStep).getFuture());
-    }
-    dependencies.add(
-        NonBlockingSteps.get(NonBlockingSteps.get(pushContainerConfigurationStep)).getFuture());
-    return Futures.whenAllSucceed(dependencies)
-        .call(this::afterAllPushed, listeningExecutorService);
-  }
-
-  private Void afterAllPushed() throws IOException, RegistryException, ExecutionException {
-    try (Timer ignored = new Timer(buildConfiguration.getBuildLogger(), DESCRIPTION)) {
-      RegistryClient.Factory registryClientFactory =
-          RegistryClient.factory(
-              buildConfiguration.getTargetImageRegistry(),
-              buildConfiguration.getTargetImageRepository());
-      RegistryClient registryClient =
-          buildConfiguration.getAllowHttp()
-              ? registryClientFactory.newAllowHttp()
-              : registryClientFactory.newWithAuthorization(
-                  NonBlockingSteps.get(authenticatePushStep));
-
-      // Constructs the image.
-      ImageToJsonTranslator imageToJsonTranslator =
-          new ImageToJsonTranslator(NonBlockingSteps.get(NonBlockingSteps.get(buildImageStep)));
-
-      // Pushes the image manifest.
-      BuildableManifestTemplate manifestTemplate =
-          imageToJsonTranslator.getManifestTemplate(
-              buildConfiguration.getTargetFormat(),
-              NonBlockingSteps.get(
-                  NonBlockingSteps.get(NonBlockingSteps.get(pushContainerConfigurationStep))));
-      registryClient.pushManifest(manifestTemplate, buildConfiguration.getTargetImageTag());
-    }
-
-    return null;
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,76 +16,60 @@
 
 package com.google.cloud.tools.jib.builder.steps;
 
-import com.google.cloud.tools.jib.Timer;
-import com.google.cloud.tools.jib.async.AsyncStep;
-import com.google.cloud.tools.jib.async.NonBlockingSteps;
-import com.google.cloud.tools.jib.builder.BuildConfiguration;
-import com.google.cloud.tools.jib.http.Authorization;
-import com.google.cloud.tools.jib.registry.RegistryAuthenticationFailedException;
-import com.google.cloud.tools.jib.registry.RegistryAuthenticator;
-import com.google.cloud.tools.jib.registry.RegistryAuthenticators;
-import com.google.cloud.tools.jib.registry.RegistryException;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.cloud.tools.jib.api.Credential;
+import com.google.cloud.tools.jib.api.RegistryException;
+import com.google.cloud.tools.jib.builder.ProgressEventDispatcher;
+import com.google.cloud.tools.jib.builder.TimerEventDispatcher;
+import com.google.cloud.tools.jib.configuration.BuildContext;
+import com.google.cloud.tools.jib.registry.RegistryClient;
+import com.google.cloud.tools.jib.registry.credentials.CredentialRetrievalException;
 import java.io.IOException;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
-import javax.annotation.Nullable;
 
-// TODO: This is probably not necessary anymore either.
 /**
  * Authenticates push to a target registry using Docker Token Authentication.
  *
  * @see <a
  *     href="https://docs.docker.com/registry/spec/auth/token/">https://docs.docker.com/registry/spec/auth/token/</a>
  */
-class AuthenticatePushStep implements AsyncStep<Authorization>, Callable<Authorization> {
+class AuthenticatePushStep implements Callable<RegistryClient> {
 
-  private static final String DESCRIPTION = "Authenticating with push to %s";
+  @SuppressWarnings("InlineFormatString")
+  private static final String DESCRIPTION = "Authenticating push to %s";
 
-  private final BuildConfiguration buildConfiguration;
-  private final RetrieveRegistryCredentialsStep retrieveTargetRegistryCredentialsStep;
-
-  private final ListenableFuture<Authorization> listenableFuture;
+  private final BuildContext buildContext;
+  private final ProgressEventDispatcher.Factory progressEventDispatcherFactory;
 
   AuthenticatePushStep(
-      ListeningExecutorService listeningExecutorService,
-      BuildConfiguration buildConfiguration,
-      RetrieveRegistryCredentialsStep retrieveTargetRegistryCredentialsStep) {
-    this.buildConfiguration = buildConfiguration;
-    this.retrieveTargetRegistryCredentialsStep = retrieveTargetRegistryCredentialsStep;
-
-    listenableFuture =
-        Futures.whenAllSucceed(retrieveTargetRegistryCredentialsStep.getFuture())
-            .call(this, listeningExecutorService);
+      BuildContext buildContext, ProgressEventDispatcher.Factory progressEventDispatcherFactory) {
+    this.buildContext = buildContext;
+    this.progressEventDispatcherFactory = progressEventDispatcherFactory;
   }
 
   @Override
-  public ListenableFuture<Authorization> getFuture() {
-    return listenableFuture;
-  }
+  public RegistryClient call() throws CredentialRetrievalException, IOException, RegistryException {
+    String registry = buildContext.getTargetImageConfiguration().getImageRegistry();
+    try (ProgressEventDispatcher progressDispatcher =
+            progressEventDispatcherFactory.create("authenticating push to " + registry, 2);
+        TimerEventDispatcher ignored2 =
+            new TimerEventDispatcher(
+                buildContext.getEventHandlers(), String.format(DESCRIPTION, registry))) {
+      Credential credential =
+          RegistryCredentialRetriever.getTargetImageCredential(buildContext).orElse(null);
+      progressDispatcher.dispatchProgress(1);
 
-  @Override
-  @Nullable
-  public Authorization call()
-      throws ExecutionException, RegistryAuthenticationFailedException, IOException,
-          RegistryException {
-    try (Timer ignored =
-        new Timer(
-            buildConfiguration.getBuildLogger(),
-            String.format(DESCRIPTION, buildConfiguration.getTargetImageRegistry()))) {
-      Authorization registryCredentials =
-          NonBlockingSteps.get(retrieveTargetRegistryCredentialsStep);
-
-      RegistryAuthenticator registryAuthenticator =
-          RegistryAuthenticators.forOther(
-              buildConfiguration.getTargetImageRegistry(),
-              buildConfiguration.getTargetImageRepository());
-      if (registryAuthenticator == null) {
-        return registryCredentials;
+      RegistryClient registryClient =
+          buildContext
+              .newTargetImageRegistryClientFactory()
+              .setCredential(credential)
+              .newRegistryClient();
+      if (!registryClient.doPushBearerAuth()) {
+        // server returned "WWW-Authenticate: Basic ..." (e.g., local Docker registry)
+        if (credential != null && !credential.isOAuth2RefreshToken()) {
+          registryClient.configureBasicAuth();
+        }
       }
-      return registryAuthenticator.setAuthorization(registryCredentials).authenticatePush();
+      return registryClient;
     }
   }
 }

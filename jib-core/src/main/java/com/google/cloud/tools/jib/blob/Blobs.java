@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,6 +16,8 @@
 
 package com.google.cloud.tools.jib.blob;
 
+import com.google.cloud.tools.jib.hash.WritableContents;
+import com.google.cloud.tools.jib.json.JsonTemplate;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -33,16 +35,26 @@ public class Blobs {
     return new FileBlob(file);
   }
 
+  public static Blob from(JsonTemplate template) {
+    return new JsonBlob(template);
+  }
+
+  /**
+   * Creates a {@link StringBlob} with UTF-8 encoding.
+   *
+   * @param content the string to create the blob from
+   * @return the {@link StringBlob}
+   */
   public static Blob from(String content) {
     return new StringBlob(content);
   }
 
-  public static Blob from(BlobWriter writer) {
-    return new WriterBlob(writer);
+  public static Blob from(WritableContents writable) {
+    return new WritableContentsBlob(writable);
   }
 
   /**
-   * Writes the BLOB to a string.
+   * Writes the BLOB to a string with UTF-8 decoding.
    *
    * @param blob the BLOB to write
    * @return the BLOB contents as a string

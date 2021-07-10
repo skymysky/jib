@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,122 +16,158 @@
 
 package com.google.cloud.tools.jib.image;
 
-import com.google.cloud.tools.jib.filesystem.DirectoryWalker;
+import com.google.cloud.tools.jib.api.buildplan.FileEntriesLayer;
+import com.google.cloud.tools.jib.api.buildplan.FileEntry;
+import com.google.cloud.tools.jib.blob.Blob;
+import com.google.cloud.tools.jib.blob.Blobs;
 import com.google.cloud.tools.jib.tar.TarStreamBuilder;
+import com.google.common.base.Verify;
 import com.google.common.collect.ImmutableList;
-import java.io.IOException;
-import java.nio.file.Files;
+import java.io.File;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 
 /**
- * Builds a reproducible {@link UnwrittenLayer} from files. The reproducibility is implemented by
- * strips out all non-reproducible elements (modification time, group ID, user ID, user name, and
- * group name) from name-sorted tar archive entries.
+ * Builds a reproducible layer {@link Blob} from files. The reproducibility is implemented by strips
+ * out all non-reproducible elements (modification time, group ID, user ID, user name, and group
+ * name) from name-sorted tar archive entries.
  */
 public class ReproducibleLayerBuilder {
 
   /**
-   * Builds the {@link TarArchiveEntry}s for adding this {@link LayerEntry} to a tarball archive.
-   *
-   * @return the list of {@link TarArchiveEntry}
-   * @throws IOException if walking a source file that is a directory failed
+   * Holds a list of {@link TarArchiveEntry}s with unique extraction paths. The list also includes
+   * all parent directories for each extraction path.
    */
-  private static List<TarArchiveEntry> buildAsTarArchiveEntries(LayerEntry layerEntry)
-      throws IOException {
-    List<TarArchiveEntry> tarArchiveEntries = new ArrayList<>();
+  private static class UniqueTarArchiveEntries {
 
-    for (Path sourceFile : layerEntry.getSourceFiles()) {
-      if (Files.isDirectory(sourceFile)) {
-        new DirectoryWalker(sourceFile)
-            .filterRoot()
-            .walk(
-                path -> {
-                  /*
-                   * Builds the same file path as in the source file for extraction. The iteration
-                   * is necessary because the path needs to be in Unix-style.
-                   */
-                  StringBuilder subExtractionPath =
-                      new StringBuilder(layerEntry.getExtractionPath());
-                  Path sourceFileRelativePath = sourceFile.getParent().relativize(path);
-                  for (Path sourceFileRelativePathComponent : sourceFileRelativePath) {
-                    subExtractionPath.append('/').append(sourceFileRelativePathComponent);
-                  }
-                  tarArchiveEntries.add(
-                      new TarArchiveEntry(path.toFile(), subExtractionPath.toString()));
-                });
+    /**
+     * Uses the current directory to act as the file input to TarArchiveEntry (since all directories
+     * are treated the same in {@link TarArchiveEntry#TarArchiveEntry(File, String)}, except for
+     * modification time, which is wiped away in {@link #build}).
+     */
+    private static final File DIRECTORY_FILE = Paths.get(".").toFile();
 
-      } else {
-        TarArchiveEntry tarArchiveEntry =
-            new TarArchiveEntry(
-                sourceFile.toFile(),
-                layerEntry.getExtractionPath() + "/" + sourceFile.getFileName());
-        tarArchiveEntries.add(tarArchiveEntry);
+    private final List<TarArchiveEntry> entries = new ArrayList<>();
+    private final Set<String> names = new HashSet<>();
+
+    /**
+     * Adds a {@link TarArchiveEntry} if its extraction path does not exist yet. Also adds all of
+     * the parent directories on the extraction path, if the parent does not exist. Parent will have
+     * modification time set to {@link FileEntriesLayer#DEFAULT_MODIFICATION_TIME}.
+     *
+     * @param tarArchiveEntry the {@link TarArchiveEntry}
+     */
+    private void add(TarArchiveEntry tarArchiveEntry) {
+      if (names.contains(tarArchiveEntry.getName())) {
+        return;
+      }
+
+      // Adds all directories along extraction paths to explicitly set permissions for those
+      // directories.
+      Path namePath = Paths.get(tarArchiveEntry.getName());
+      if (namePath.getParent() != namePath.getRoot()) {
+        TarArchiveEntry dir = new TarArchiveEntry(DIRECTORY_FILE, namePath.getParent().toString());
+        dir.setModTime(FileEntriesLayer.DEFAULT_MODIFICATION_TIME.toEpochMilli());
+        add(dir);
+      }
+
+      entries.add(tarArchiveEntry);
+      names.add(tarArchiveEntry.getName());
+    }
+
+    private List<TarArchiveEntry> getSortedEntries() {
+      List<TarArchiveEntry> sortedEntries = new ArrayList<>(entries);
+      sortedEntries.sort(Comparator.comparing(TarArchiveEntry::getName));
+      return sortedEntries;
+    }
+  }
+
+  private static void setUserAndGroup(TarArchiveEntry entry, FileEntry layerEntry) {
+    entry.setUserId(0);
+    entry.setGroupId(0);
+    entry.setUserName("");
+    entry.setGroupName("");
+
+    if (!layerEntry.getOwnership().isEmpty()) {
+      // Parse "<user>:<group>" string.
+      String user = layerEntry.getOwnership();
+      String group = "";
+      int colonIndex = user.indexOf(':');
+      if (colonIndex != -1) {
+        group = user.substring(colonIndex + 1);
+        user = user.substring(0, colonIndex);
+      }
+
+      if (!user.isEmpty()) {
+        // Check if it's a number, and set either UID or user name.
+        try {
+          entry.setUserId(Long.parseLong(user));
+        } catch (NumberFormatException ignored) {
+          entry.setUserName(user);
+        }
+      }
+      if (!group.isEmpty()) {
+        // Check if it's a number, and set either GID or group name.
+        try {
+          entry.setGroupId(Long.parseLong(group));
+        } catch (NumberFormatException ignored) {
+          entry.setGroupName(group);
+        }
       }
     }
-
-    return tarArchiveEntries;
   }
 
-  private final List<LayerEntry> layerEntries = new ArrayList<>();
+  private final ImmutableList<FileEntry> layerEntries;
 
-  public ReproducibleLayerBuilder() {}
-
-  /**
-   * Adds the {@code sourceFiles} to be extracted on the image at {@code extractionPath}. The order
-   * in which files are added matters.
-   *
-   * @param sourceFiles the source files to build from
-   * @param extractionPath the Unix-style path to add the source files to in the container image
-   *     filesystem
-   * @return this
-   */
-  public ReproducibleLayerBuilder addFiles(List<Path> sourceFiles, String extractionPath) {
-    this.layerEntries.add(new LayerEntry(ImmutableList.copyOf(sourceFiles), extractionPath));
-    return this;
+  public ReproducibleLayerBuilder(ImmutableList<FileEntry> layerEntries) {
+    this.layerEntries = layerEntries;
   }
 
   /**
-   * Builds and returns the layer.
+   * Builds and returns the layer {@link Blob}.
    *
    * @return the new layer
-   * @throws IOException if walking the source files fails
    */
-  public UnwrittenLayer build() throws IOException {
-    List<TarArchiveEntry> filesystemEntries = new ArrayList<>();
+  public Blob build() {
+    UniqueTarArchiveEntries uniqueTarArchiveEntries = new UniqueTarArchiveEntries();
 
     // Adds all the layer entries as tar entries.
-    for (LayerEntry layerEntry : layerEntries) {
-      filesystemEntries.addAll(buildAsTarArchiveEntries(layerEntry));
+    for (FileEntry layerEntry : layerEntries) {
+      // Adds the entries to uniqueTarArchiveEntries, which makes sure all entries are unique and
+      // adds parent directories for each extraction path.
+      TarArchiveEntry entry =
+          new TarArchiveEntry(
+              layerEntry.getSourceFile().toFile(), layerEntry.getExtractionPath().toString());
+
+      // Sets the entry's permissions by masking out the permission bits from the entry's mode (the
+      // lowest 9 bits) then using a bitwise OR to set them to the layerEntry's permissions.
+      entry.setMode((entry.getMode() & ~0777) | layerEntry.getPermissions().getPermissionBits());
+      entry.setModTime(layerEntry.getModificationTime().toEpochMilli());
+      setUserAndGroup(entry, layerEntry);
+
+      uniqueTarArchiveEntries.add(entry);
     }
+
+    // Gets the entries sorted by extraction path.
+    List<TarArchiveEntry> sortedFilesystemEntries = uniqueTarArchiveEntries.getSortedEntries();
+
+    Set<String> names = new HashSet<>();
 
     // Adds all the files to a tar stream.
     TarStreamBuilder tarStreamBuilder = new TarStreamBuilder();
-    filesystemEntries.sort(Comparator.comparing(TarArchiveEntry::getName));
-    for (TarArchiveEntry entry : filesystemEntries) {
-      // Strips out all non-reproducible elements from tar archive entries.
-      entry.setModTime(0);
-      entry.setGroupId(0);
-      entry.setUserId(0);
-      entry.setUserName("");
-      entry.setGroupName("");
+    for (TarArchiveEntry entry : sortedFilesystemEntries) {
+      Verify.verify(!names.contains(entry.getName()));
+      names.add(entry.getName());
 
-      tarStreamBuilder.addEntry(entry);
+      tarStreamBuilder.addTarArchiveEntry(entry);
     }
 
-    return new UnwrittenLayer(tarStreamBuilder.toBlob());
-  }
-
-  public List<Path> getSourceFiles() {
-    List<Path> allSourceFiles = new ArrayList<>();
-
-    for (LayerEntry layerEntry : layerEntries) {
-      allSourceFiles.addAll(layerEntry.getSourceFiles());
-    }
-
-    return allSourceFiles;
+    return Blobs.from(tarStreamBuilder::writeAsTarArchiveTo);
   }
 }

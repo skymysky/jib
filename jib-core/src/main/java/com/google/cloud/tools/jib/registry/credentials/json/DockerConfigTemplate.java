@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -18,7 +18,7 @@ package com.google.cloud.tools.jib.registry.credentials.json;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.google.cloud.tools.jib.json.JsonTemplate;
-import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
 import java.util.HashMap;
 import java.util.Map;
 import javax.annotation.Nullable;
@@ -32,12 +32,13 @@ import javax.annotation.Nullable;
  * {
  *   "auths": {
  *     "registry": {
- *       "auth": "username:password in base64"
+ *       "auth": "username:password string in base64",
+ *       "identityToken": "..."
  *     },
  *     "anotherregistry": {},
  *     ...
  *   },
- *   "credsStore": "credential helper name",
+ *   "credsStore": "legacy credential helper config acting as a \"default\" helper",
  *   "credHelpers": {
  *     "registry": "credential helper name",
  *     "anotherregistry": "another credential helper name",
@@ -46,84 +47,68 @@ import javax.annotation.Nullable;
  * }
  * }</pre>
  *
- * If an {@code auth} is defined for a registry, that is a valid {@code Basic} authorization to use
- * for that registry.
- *
- * <p>If {@code credsStore} is defined, is a credential helper that stores authorizations for all
- * registries listed under {@code auths}.
- *
  * <p>Each entry in {@code credHelpers} is a mapping from a registry to a credential helper that
- * stores the authorization for that registry.
+ * stores the authorization for that registry. This takes precedence over {@code credsStore} if
+ * there exists a match.
  *
- * @see <a
- *     href="https://www.projectatomic.io/blog/2016/03/docker-credentials-store/">https://www.projectatomic.io/blog/2016/03/docker-credentials-store/</a>
+ * <p>{@code credsStore} is a legacy config that acts to provide a "default" credential helper if
+ * there is no match in {@code credHelpers}.
+ *
+ * <p>If an {@code auth} is defined for a registry, that is a valid {@code Basic} authorization to
+ * use for that registry.
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class DockerConfigTemplate implements JsonTemplate {
 
   /** Template for an {@code auth} defined for a registry under {@code auths}. */
-  private static class AuthTemplate implements JsonTemplate {
+  @JsonIgnoreProperties(ignoreUnknown = true)
+  public static class AuthTemplate implements JsonTemplate {
 
     @Nullable private String auth;
+
+    // Both "identitytoken" and "identityToken" have been observed. For example,
+    // https://github.com/GoogleContainerTools/jib/issues/2488
+    // https://github.com/spotify/docker-client/issues/580
+    @Nullable private String identityToken;
+
+    @Nullable
+    public String getAuth() {
+      return auth;
+    }
+
+    @Nullable
+    public String getIdentityToken() {
+      return identityToken;
+    }
   }
 
   /** Maps from registry to its {@link AuthTemplate}. */
-  private final Map<String, AuthTemplate> auths = new HashMap<>();
+  private final Map<String, AuthTemplate> auths;
 
   @Nullable private String credsStore;
 
   /** Maps from registry to credential helper name. */
   private final Map<String, String> credHelpers = new HashMap<>();
 
-  /**
-   * @param registry the registry to get the authorization for
-   * @return the base64-encoded {@code Basic} authorization for {@code registry}, or {@code null} if
-   *     none exists
-   */
+  public DockerConfigTemplate(Map<String, AuthTemplate> auths) {
+    this.auths = ImmutableMap.copyOf(auths);
+  }
+
+  @SuppressWarnings("unused")
+  private DockerConfigTemplate() {
+    auths = new HashMap<>();
+  }
+
+  public Map<String, AuthTemplate> getAuths() {
+    return auths;
+  }
+
   @Nullable
-  public String getAuthFor(String registry) {
-    if (!auths.containsKey(registry)) {
-      return null;
-    }
-    return auths.get(registry).auth;
+  public String getCredsStore() {
+    return credsStore;
   }
 
-  /**
-   * @param registry the registry to get the credential helpers for
-   * @return {@code credsStore} if {@code registry} is present in {@code auths}; otherwise, searches
-   *     {@code credHelpers}; otherwise, {@code null} if not found
-   */
-  @Nullable
-  public String getCredentialHelperFor(String registry) {
-    if (credsStore != null) {
-      // The registry could be prefixed with the HTTPS protocol.
-      if (auths.containsKey(registry) || auths.containsKey("https://" + registry)) {
-        return credsStore;
-      }
-    }
-    if (credHelpers.containsKey(registry)) {
-      return credHelpers.get(registry);
-    }
-    return null;
-  }
-
-  @VisibleForTesting
-  DockerConfigTemplate addAuth(String registry, @Nullable String auth) {
-    AuthTemplate authTemplate = new AuthTemplate();
-    authTemplate.auth = auth;
-    auths.put(registry, authTemplate);
-    return this;
-  }
-
-  @VisibleForTesting
-  DockerConfigTemplate setCredsStore(String credsStore) {
-    this.credsStore = credsStore;
-    return this;
-  }
-
-  @VisibleForTesting
-  DockerConfigTemplate addCredHelper(String registry, String credHelper) {
-    credHelpers.put(registry, credHelper);
-    return this;
+  public Map<String, String> getCredHelpers() {
+    return credHelpers;
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,18 +16,19 @@
 
 package com.google.cloud.tools.jib.registry;
 
-import com.google.cloud.tools.jib.blob.Blob;
-import com.google.cloud.tools.jib.blob.Blobs;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import com.google.cloud.tools.jib.hash.CountingDigestOutputStream;
+import com.google.cloud.tools.jib.hash.Digests;
 import com.google.cloud.tools.jib.http.Response;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
-import com.google.common.io.ByteStreams;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.DigestException;
+import java.util.concurrent.atomic.LongAdder;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
@@ -50,39 +51,56 @@ public class BlobPullerTest {
   private BlobPuller testBlobPuller;
 
   @Before
-  public void setUpFakes() throws DigestException, IOException {
+  public void setUpFakes() throws DigestException {
     fakeDigest =
         DescriptorDigest.fromHash(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
     testBlobPuller =
-        new BlobPuller(fakeRegistryEndpointRequestProperties, fakeDigest, layerOutputStream);
+        new BlobPuller(
+            fakeRegistryEndpointRequestProperties,
+            fakeDigest,
+            layerOutputStream,
+            ignored -> {},
+            ignored -> {});
   }
 
   @Test
   public void testHandleResponse() throws IOException, UnexpectedBlobDigestException {
-    Blob testBlob = Blobs.from("some BLOB content");
-    DescriptorDigest testBlobDigest = testBlob.writeTo(ByteStreams.nullOutputStream()).getDigest();
+    InputStream blobContent =
+        new ByteArrayInputStream("some BLOB content".getBytes(StandardCharsets.UTF_8));
+    DescriptorDigest testBlobDigest = Digests.computeDigest(blobContent).getDigest();
+    blobContent.reset();
 
     Response mockResponse = Mockito.mock(Response.class);
-    Mockito.when(mockResponse.getBody()).thenReturn(testBlob);
+    Mockito.when(mockResponse.getContentLength()).thenReturn((long) "some BLOB content".length());
+    Mockito.when(mockResponse.getBody()).thenReturn(blobContent);
 
+    LongAdder byteCount = new LongAdder();
     BlobPuller blobPuller =
-        new BlobPuller(fakeRegistryEndpointRequestProperties, testBlobDigest, layerOutputStream);
+        new BlobPuller(
+            fakeRegistryEndpointRequestProperties,
+            testBlobDigest,
+            layerOutputStream,
+            size -> Assert.assertEquals("some BLOB content".length(), size.longValue()),
+            byteCount::add);
     blobPuller.handleResponse(mockResponse);
     Assert.assertEquals(
         "some BLOB content",
         new String(layerContentOutputStream.toByteArray(), StandardCharsets.UTF_8));
-    Assert.assertEquals(testBlobDigest, layerOutputStream.toBlobDescriptor().getDigest());
+    Assert.assertEquals(testBlobDigest, layerOutputStream.computeDigest().getDigest());
+    Assert.assertEquals("some BLOB content".length(), byteCount.sum());
   }
 
   @Test
   public void testHandleResponse_unexpectedDigest() throws IOException {
-    Blob testBlob = Blobs.from("some BLOB content");
-    DescriptorDigest testBlobDigest = testBlob.writeTo(ByteStreams.nullOutputStream()).getDigest();
+    InputStream blobContent =
+        new ByteArrayInputStream("some BLOB content".getBytes(StandardCharsets.UTF_8));
+    DescriptorDigest testBlobDigest = Digests.computeDigest(blobContent).getDigest();
+    blobContent.reset();
 
     Response mockResponse = Mockito.mock(Response.class);
-    Mockito.when(mockResponse.getBody()).thenReturn(testBlob);
+    Mockito.when(mockResponse.getBody()).thenReturn(blobContent);
 
     try {
       testBlobPuller.handleResponse(mockResponse);

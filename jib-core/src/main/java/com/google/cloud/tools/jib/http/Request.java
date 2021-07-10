@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,6 +16,7 @@
 
 package com.google.cloud.tools.jib.http;
 
+import com.google.api.client.http.HttpContent;
 import com.google.api.client.http.HttpHeaders;
 import java.util.List;
 import javax.annotation.Nullable;
@@ -27,12 +28,16 @@ public class Request {
   private final HttpHeaders headers;
 
   /** The HTTP request body. */
-  @Nullable private BlobHttpContent body;
+  @Nullable private final HttpContent body;
+
+  /** HTTP connection and read timeout. */
+  @Nullable private final Integer httpTimeout;
 
   public static class Builder {
 
     private final HttpHeaders headers = new HttpHeaders().setAccept("*/*");
-    @Nullable private BlobHttpContent body;
+    @Nullable private HttpContent body;
+    @Nullable private Integer httpTimeout;
 
     public Request build() {
       return new Request(this);
@@ -45,9 +50,7 @@ public class Request {
      * @return this
      */
     public Builder setAuthorization(@Nullable Authorization authorization) {
-      if (authorization != null) {
-        headers.setAuthorization(authorization.toString());
-      }
+      headers.setAuthorization(authorization == null ? null : authorization.toString());
       return this;
     }
 
@@ -68,19 +71,31 @@ public class Request {
      * @param userAgent the user agent
      * @return this
      */
-    public Builder setUserAgent(String userAgent) {
+    public Builder setUserAgent(@Nullable String userAgent) {
       headers.setUserAgent(userAgent);
+      return this;
+    }
+
+    /**
+     * Sets the HTTP connection and read timeout in milliseconds. {@code null} uses the default
+     * timeout and {@code 0} an infinite timeout.
+     *
+     * @param httpTimeout timeout in milliseconds
+     * @return this
+     */
+    public Builder setHttpTimeout(@Nullable Integer httpTimeout) {
+      this.httpTimeout = httpTimeout;
       return this;
     }
 
     /**
      * Sets the body and its corresponding {@code Content-Type} header.
      *
-     * @param blobHttpContent the body content
+     * @param httpContent the body content
      * @return this
      */
-    public Builder setBody(@Nullable BlobHttpContent blobHttpContent) {
-      this.body = blobHttpContent;
+    public Builder setBody(@Nullable HttpContent httpContent) {
+      this.body = httpContent;
       return this;
     }
   }
@@ -92,6 +107,7 @@ public class Request {
   private Request(Builder builder) {
     this.headers = builder.headers;
     this.body = builder.body;
+    this.httpTimeout = builder.httpTimeout;
   }
 
   HttpHeaders getHeaders() {
@@ -99,7 +115,12 @@ public class Request {
   }
 
   @Nullable
-  BlobHttpContent getHttpContent() {
+  HttpContent getHttpContent() {
     return body;
+  }
+
+  @Nullable
+  Integer getHttpTimeout() {
+    return httpTimeout;
   }
 }

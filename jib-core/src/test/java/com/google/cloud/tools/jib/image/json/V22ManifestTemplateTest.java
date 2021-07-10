@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,10 +16,11 @@
 
 package com.google.cloud.tools.jib.image.json;
 
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.image.json.BuildableManifestTemplate.ContentDescriptorTemplate;
 import com.google.cloud.tools.jib.json.JsonTemplateMapper;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.io.Resources;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +28,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.DigestException;
+import java.util.Arrays;
+import java.util.List;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -36,7 +39,7 @@ public class V22ManifestTemplateTest {
   @Test
   public void testToJson() throws DigestException, IOException, URISyntaxException {
     // Loads the expected JSON string.
-    Path jsonFile = Paths.get(Resources.getResource("json/v22manifest.json").toURI());
+    Path jsonFile = Paths.get(Resources.getResource("core/json/v22manifest.json").toURI());
     String expectedJson = new String(Files.readAllBytes(jsonFile), StandardCharsets.UTF_8);
 
     // Creates the JSON object to serialize.
@@ -53,16 +56,13 @@ public class V22ManifestTemplateTest {
             "4945ba5011739b0b98c4a41afe224e417f47c7c99b2ce76830999c9a0861b236"));
 
     // Serializes the JSON object.
-    ByteArrayOutputStream jsonStream = new ByteArrayOutputStream();
-    JsonTemplateMapper.toBlob(manifestJson).writeTo(jsonStream);
-
-    Assert.assertEquals(expectedJson, jsonStream.toString());
+    Assert.assertEquals(expectedJson, JsonTemplateMapper.toUtf8String(manifestJson));
   }
 
   @Test
   public void testFromJson() throws IOException, URISyntaxException, DigestException {
     // Loads the JSON string.
-    Path jsonFile = Paths.get(Resources.getResource("json/v22manifest.json").toURI());
+    Path jsonFile = Paths.get(Resources.getResource("core/json/v22manifest.json").toURI());
 
     // Deserializes into a manifest JSON object.
     V22ManifestTemplate manifestJson =
@@ -81,5 +81,29 @@ public class V22ManifestTemplateTest {
         manifestJson.getLayers().get(0).getDigest());
 
     Assert.assertEquals(1000_000, manifestJson.getLayers().get(0).getSize());
+  }
+
+  @Test
+  public void testFromJson_optionalProperties() throws IOException, URISyntaxException {
+    Path jsonFile =
+        Paths.get(Resources.getResource("core/json/v22manifest_optional_properties.json").toURI());
+
+    V22ManifestTemplate manifestJson =
+        JsonTemplateMapper.readJsonFromFile(jsonFile, V22ManifestTemplate.class);
+
+    List<ContentDescriptorTemplate> layers = manifestJson.getLayers();
+    Assert.assertEquals(4, layers.size());
+    Assert.assertNull(layers.get(0).getUrls());
+    Assert.assertNull(layers.get(0).getAnnotations());
+
+    Assert.assertEquals(Arrays.asList("url-foo", "url-bar"), layers.get(1).getUrls());
+    Assert.assertNull(layers.get(1).getAnnotations());
+
+    Assert.assertNull(layers.get(2).getUrls());
+    Assert.assertEquals(ImmutableMap.of("key-foo", "value-foo"), layers.get(2).getAnnotations());
+
+    Assert.assertEquals(Arrays.asList("cool-url"), layers.get(3).getUrls());
+    Assert.assertEquals(
+        ImmutableMap.of("key1", "value1", "key2", "value2"), layers.get(3).getAnnotations());
   }
 }

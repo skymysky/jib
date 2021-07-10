@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,21 +16,15 @@
 
 package com.google.cloud.tools.jib.gradle;
 
-import com.google.cloud.tools.jib.builder.BuildLogger;
-import com.google.cloud.tools.jib.image.ImageFormat;
-import com.google.cloud.tools.jib.image.json.BuildableManifestTemplate;
-import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
-import java.util.Collections;
-import java.util.List;
-import javax.annotation.Nullable;
+import com.google.cloud.tools.jib.gradle.skaffold.SkaffoldParameters;
+import com.google.cloud.tools.jib.plugins.common.PropertyNames;
 import org.gradle.api.Action;
 import org.gradle.api.Project;
 import org.gradle.api.model.ObjectFactory;
+import org.gradle.api.plugins.JavaPlugin;
 import org.gradle.api.provider.ListProperty;
 import org.gradle.api.provider.Property;
 import org.gradle.api.tasks.Input;
-import org.gradle.api.tasks.Internal;
 import org.gradle.api.tasks.Nested;
 import org.gradle.api.tasks.Optional;
 
@@ -42,19 +36,46 @@ import org.gradle.api.tasks.Optional;
  * <pre>{@code
  * jib {
  *   from {
- *     image = ‘gcr.io/my-gcp-project/my-base-image’
- *     credHelper = ‘gcr’
+ *     image = 'gcr.io/my-gcp-project/my-base-image'
+ *     credHelper = 'gcr'
+ *     platforms {
+ *       platform {
+ *         os = 'linux'
+ *         architecture = 'amd64'
+ *       }
+ *     }
  *   }
  *   to {
- *     image = ‘gcr.io/gcp-project/my-app:built-with-jib’
- *     credHelper = ‘ecr-login’
+ *     image = 'gcr.io/gcp-project/my-app:built-with-jib'
+ *     credHelper = 'ecr-login'
  *   }
  *   container {
- *     jvmFlags = [‘-Xms512m’, ‘-Xdebug’]
- *     mainClass = ‘com.mycompany.myproject.Main’
+ *     jvmFlags = ['-Xms512m', '-Xdebug']
+ *     mainClass = 'com.mycompany.myproject.Main'
  *     args = ['arg1', 'arg2']
- *     exposedPorts = ['1000', '2000-2010', '3000']
+ *     ports = ['1000', '2000-2010', '3000']
  *     format = OCI
+ *     appRoot = '/app'
+ *   }
+ *   extraDirectories {
+ *     paths = ['/path/to/extra/dir', 'can/be/relative/to/project/root']
+ *     permissions = [
+ *       '/path/on/container/file1': 744,
+ *       '/path/on/container/file2': 123
+ *     ]
+ *   }
+ *   outputPaths {
+ *     tar = file('reative/to/project/root/jib-image.tar')
+ *     digest = file('/absolute/path/jib-image.digest')
+ *     imageId = file("$buildDir/jib-image.id")
+ *   }
+ *   allowInsecureRegistries = false
+ *   containerizingMode = 'exploded'
+ *   pluginExtensions {
+ *     pluginExtension {
+ *       implementation = 'com.example.ThirdPartyJibGradleExtension'
+ *       properties = [customKey: 'value]
+ *     }
  *   }
  * }
  * }</pre>
@@ -62,89 +83,56 @@ import org.gradle.api.tasks.Optional;
 public class JibExtension {
 
   // Defines default configuration values.
-  private static final String DEFAULT_FROM_IMAGE = "gcr.io/distroless/java";
-  private static final boolean DEFAULT_USE_ONLY_PROJECT_CACHE = false;
   private static final boolean DEFAULT_ALLOW_INSECURE_REGISTIRIES = false;
+  private static final String DEFAULT_CONTAINERIZING_MODE = "exploded";
 
-  private final ImageConfiguration from;
-  private final ImageConfiguration to;
+  private final BaseImageParameters from;
+  private final TargetImageParameters to;
   private final ContainerParameters container;
-  private final Property<Boolean> useOnlyProjectCache;
+  private final ExtraDirectoriesParameters extraDirectories;
+  private final DockerClientParameters dockerClient;
+  private final OutputPathsParameters outputPaths;
+  private final SkaffoldParameters skaffold;
   private final Property<Boolean> allowInsecureRegistries;
+  private final Property<String> containerizingMode;
+  private final Property<String> configurationName;
+  private final ListProperty<ExtensionParameters> pluginExtensions;
+  private final ExtensionParametersSpec extensionParametersSpec;
 
-  // TODO: Deprecated parameters; remove these 4
-  private final ListProperty<String> jvmFlags;
-  private final Property<String> mainClass;
-  private final ListProperty<String> args;
-  private final Property<ImageFormat> format;
-
+  /**
+   * Should be called using {@link org.gradle.api.plugins.ExtensionContainer#create}.
+   *
+   * @param project the injected gradle project
+   */
   public JibExtension(Project project) {
     ObjectFactory objectFactory = project.getObjects();
 
-    from = objectFactory.newInstance(ImageConfiguration.class);
-    to = objectFactory.newInstance(ImageConfiguration.class);
+    from = objectFactory.newInstance(BaseImageParameters.class);
+    to = objectFactory.newInstance(TargetImageParameters.class);
     container = objectFactory.newInstance(ContainerParameters.class);
+    extraDirectories = objectFactory.newInstance(ExtraDirectoriesParameters.class, project);
+    dockerClient = objectFactory.newInstance(DockerClientParameters.class);
+    outputPaths = objectFactory.newInstance(OutputPathsParameters.class, project);
+    skaffold = objectFactory.newInstance(SkaffoldParameters.class, project);
 
-    jvmFlags = objectFactory.listProperty(String.class);
-    mainClass = objectFactory.property(String.class);
-    args = objectFactory.listProperty(String.class);
-    format = objectFactory.property(ImageFormat.class);
-
-    useOnlyProjectCache = objectFactory.property(Boolean.class);
-    allowInsecureRegistries = objectFactory.property(Boolean.class);
-
-    // Sets defaults.
-    from.setImage(DEFAULT_FROM_IMAGE);
-    jvmFlags.set(Collections.emptyList());
-    args.set(Collections.emptyList());
-    useOnlyProjectCache.set(DEFAULT_USE_ONLY_PROJECT_CACHE);
-    allowInsecureRegistries.set(DEFAULT_ALLOW_INSECURE_REGISTIRIES);
+    pluginExtensions = objectFactory.listProperty(ExtensionParameters.class).empty();
+    extensionParametersSpec =
+        objectFactory.newInstance(ExtensionParametersSpec.class, pluginExtensions);
+    allowInsecureRegistries =
+        objectFactory.property(Boolean.class).convention(DEFAULT_ALLOW_INSECURE_REGISTIRIES);
+    containerizingMode =
+        objectFactory.property(String.class).convention(DEFAULT_CONTAINERIZING_MODE);
+    configurationName =
+        objectFactory
+            .property(String.class)
+            .convention(JavaPlugin.RUNTIME_CLASSPATH_CONFIGURATION_NAME);
   }
 
-  /**
-   * Warns about deprecated parameters in use.
-   *
-   * @param logger The logger used to print the warnings
-   */
-  void handleDeprecatedParameters(BuildLogger logger) {
-    StringBuilder deprecatedParams = new StringBuilder();
-    if (!jvmFlags.get().isEmpty()) {
-      deprecatedParams.append("  jvmFlags -> container.jvmFlags\n");
-      if (container.getJvmFlags().isEmpty()) {
-        container.setJvmFlags(jvmFlags.get());
-      }
-    }
-    if (!Strings.isNullOrEmpty(mainClass.getOrNull())) {
-      deprecatedParams.append("  mainClass -> container.mainClass\n");
-      if (Strings.isNullOrEmpty(container.getMainClass())) {
-        container.setMainClass(mainClass.getOrNull());
-      }
-    }
-    if (!args.get().isEmpty()) {
-      deprecatedParams.append("  args -> container.args\n");
-      if (container.getArgs().isEmpty()) {
-        container.setArgs(args.get());
-      }
-    }
-    if (format.getOrNull() != null) {
-      deprecatedParams.append("  format -> container.format\n");
-      container.setFormat(format.get());
-    }
-
-    if (deprecatedParams.length() > 0) {
-      logger.warn(
-          "There are deprecated parameters used in the build configuration. Please make the "
-              + "following changes to your build.gradle to avoid issues in the future:\n"
-              + deprecatedParams
-              + "You may also wrap the parameters in a container{} block.");
-    }
-  }
-
-  public void from(Action<? super ImageConfiguration> action) {
+  public void from(Action<? super BaseImageParameters> action) {
     action.execute(from);
   }
 
-  public void to(Action<? super ImageConfiguration> action) {
+  public void to(Action<? super TargetImageParameters> action) {
     action.execute(to);
   }
 
@@ -152,50 +140,43 @@ public class JibExtension {
     action.execute(container);
   }
 
-  public void setJvmFlags(List<String> jvmFlags) {
-    this.jvmFlags.set(jvmFlags);
+  public void extraDirectories(Action<? super ExtraDirectoriesParameters> action) {
+    action.execute(extraDirectories);
   }
 
-  public void setMainClass(String mainClass) {
-    this.mainClass.set(mainClass);
+  public void dockerClient(Action<? super DockerClientParameters> action) {
+    action.execute(dockerClient);
   }
 
-  public void setArgs(List<String> args) {
-    this.args.set(args);
+  public void outputPaths(Action<? super OutputPathsParameters> action) {
+    action.execute(outputPaths);
   }
 
-  public void setFormat(ImageFormat format) {
-    this.format.set(format);
+  public void skaffold(Action<? super SkaffoldParameters> action) {
+    action.execute(skaffold);
   }
 
-  public void setUseOnlyProjectCache(boolean useOnlyProjectCache) {
-    this.useOnlyProjectCache.set(useOnlyProjectCache);
+  public void pluginExtensions(Action<? super ExtensionParametersSpec> action) {
+    action.execute(extensionParametersSpec);
   }
 
   public void setAllowInsecureRegistries(boolean allowInsecureRegistries) {
     this.allowInsecureRegistries.set(allowInsecureRegistries);
   }
 
-  @Internal
-  String getBaseImage() {
-    return Preconditions.checkNotNull(from.getImage());
-  }
-
-  @Internal
-  @Nullable
-  String getTargetImage() {
-    return to.getImage();
+  public void setContainerizingMode(String containerizingMode) {
+    this.containerizingMode.set(containerizingMode);
   }
 
   @Nested
   @Optional
-  public ImageConfiguration getFrom() {
+  public BaseImageParameters getFrom() {
     return from;
   }
 
   @Nested
   @Optional
-  public ImageConfiguration getTo() {
+  public TargetImageParameters getTo() {
     return to;
   }
 
@@ -205,50 +186,64 @@ public class JibExtension {
     return container;
   }
 
-  // TODO: Make @Internal (deprecated)
-  @Input
+  @Nested
   @Optional
-  List<String> getJvmFlags() {
-    return container.getJvmFlags();
+  public ExtraDirectoriesParameters getExtraDirectories() {
+    return extraDirectories;
   }
 
-  // TODO: Make @Internal (deprecated)
-  @Input
-  @Nullable
+  @Nested
   @Optional
-  String getMainClass() {
-    return container.getMainClass();
+  public DockerClientParameters getDockerClient() {
+    return dockerClient;
   }
 
-  // TODO: Make @Internal (deprecated)
-  @Input
+  @Nested
   @Optional
-  List<String> getArgs() {
-    return container.getArgs();
+  public OutputPathsParameters getOutputPaths() {
+    return outputPaths;
   }
 
-  // TODO: Make @Internal (deprecated)
-  @Input
+  @Nested
   @Optional
-  Class<? extends BuildableManifestTemplate> getFormat() {
-    return container.getFormat();
-  }
-
-  @Internal
-  @Optional
-  List<String> getExposedPorts() {
-    return container.getPorts();
+  public SkaffoldParameters getSkaffold() {
+    return skaffold;
   }
 
   @Input
-  @Optional
-  boolean getUseOnlyProjectCache() {
-    return useOnlyProjectCache.get();
-  }
-
-  @Input
-  @Optional
   boolean getAllowInsecureRegistries() {
+    if (System.getProperty(PropertyNames.ALLOW_INSECURE_REGISTRIES) != null) {
+      return Boolean.getBoolean(PropertyNames.ALLOW_INSECURE_REGISTRIES);
+    }
     return allowInsecureRegistries.get();
+  }
+
+  @Input
+  @Optional
+  public String getContainerizingMode() {
+    String property = System.getProperty(PropertyNames.CONTAINERIZING_MODE);
+    return property != null ? property : containerizingMode.get();
+  }
+
+  /**
+   * Returns the configurationName property while setting it to the value of the system property if
+   * present.
+   *
+   * @return The configurationName property
+   */
+  @Input
+  @Optional
+  public Property<String> getConfigurationName() {
+    String property = System.getProperty(PropertyNames.CONFIGURATION_NAME);
+    if (property != null && !property.equals(configurationName.get())) {
+      configurationName.set(property);
+    }
+    return configurationName;
+  }
+
+  @Nested
+  @Optional
+  public ListProperty<ExtensionParameters> getPluginExtensions() {
+    return pluginExtensions;
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,21 +16,30 @@
 
 package com.google.cloud.tools.jib.gradle;
 
-import com.google.cloud.tools.jib.builder.BuildConfiguration;
-import com.google.cloud.tools.jib.cache.CacheDirectoryCreationException;
-import com.google.cloud.tools.jib.configuration.CacheConfiguration;
+import com.google.cloud.tools.jib.api.CacheDirectoryCreationException;
+import com.google.cloud.tools.jib.api.InvalidImageReferenceException;
 import com.google.cloud.tools.jib.docker.DockerClient;
-import com.google.cloud.tools.jib.frontend.BuildStepsExecutionException;
-import com.google.cloud.tools.jib.frontend.BuildStepsRunner;
-import com.google.cloud.tools.jib.frontend.ExposedPortsParser;
-import com.google.cloud.tools.jib.frontend.HelpfulSuggestions;
-import com.google.cloud.tools.jib.http.Authorization;
-import com.google.cloud.tools.jib.image.ImageReference;
-import com.google.cloud.tools.jib.image.InvalidImageReferenceException;
-import com.google.cloud.tools.jib.registry.RegistryClient;
-import com.google.cloud.tools.jib.registry.credentials.RegistryCredentials;
+import com.google.cloud.tools.jib.filesystem.TempDirectoryProvider;
+import com.google.cloud.tools.jib.plugins.common.BuildStepsExecutionException;
+import com.google.cloud.tools.jib.plugins.common.HelpfulSuggestions;
+import com.google.cloud.tools.jib.plugins.common.IncompatibleBaseImageJavaVersionException;
+import com.google.cloud.tools.jib.plugins.common.InvalidAppRootException;
+import com.google.cloud.tools.jib.plugins.common.InvalidContainerVolumeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidContainerizingModeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidCreationTimeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidFilesModificationTimeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidPlatformException;
+import com.google.cloud.tools.jib.plugins.common.InvalidWorkingDirectoryException;
+import com.google.cloud.tools.jib.plugins.common.MainClassInferenceException;
+import com.google.cloud.tools.jib.plugins.common.PluginConfigurationProcessor;
+import com.google.cloud.tools.jib.plugins.common.globalconfig.GlobalConfig;
+import com.google.cloud.tools.jib.plugins.common.globalconfig.InvalidGlobalConfigException;
+import com.google.cloud.tools.jib.plugins.extension.JibPluginExtensionException;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.Optional;
+import java.util.concurrent.Future;
 import javax.annotation.Nullable;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.GradleException;
@@ -39,13 +48,9 @@ import org.gradle.api.tasks.TaskAction;
 import org.gradle.api.tasks.options.Option;
 
 /** Builds a container image and exports to the default Docker daemon. */
-public class BuildDockerTask extends DefaultTask {
+public class BuildDockerTask extends DefaultTask implements JibTask {
 
-  /** {@code User-Agent} header suffix to send to the registry. */
-  private static final String USER_AGENT_SUFFIX = "jib-gradle-plugin";
-
-  private static final HelpfulSuggestions HELPFUL_SUGGESTIONS =
-      HelpfulSuggestionsProvider.get("Build to Docker daemon failed");
+  private static final String HELPFUL_SUGGESTIONS_PREFIX = "Build to Docker daemon failed";
 
   @Nullable private JibExtension jibExtension;
 
@@ -71,98 +76,120 @@ public class BuildDockerTask extends DefaultTask {
     Preconditions.checkNotNull(jibExtension).getTo().setImage(targetImage);
   }
 
+  /**
+   * Task Action, builds an image to docker daemon.
+   *
+   * @throws IOException if an error occurs creating the jib runner
+   * @throws BuildStepsExecutionException if an error occurs while executing build steps
+   * @throws CacheDirectoryCreationException if a new cache directory could not be created
+   * @throws MainClassInferenceException if a main class could not be found
+   * @throws InvalidGlobalConfigException if the global config file is invalid
+   */
   @TaskAction
-  public void buildDocker() throws InvalidImageReferenceException {
-    if (!new DockerClient().isDockerInstalled()) {
-      throw new GradleException(HELPFUL_SUGGESTIONS.forDockerNotInstalled());
-    }
-
-    // Asserts required @Input parameters are not null.
+  public void buildDocker()
+      throws IOException, BuildStepsExecutionException, CacheDirectoryCreationException,
+          MainClassInferenceException, InvalidGlobalConfigException {
     Preconditions.checkNotNull(jibExtension);
-    GradleBuildLogger gradleBuildLogger = new GradleBuildLogger(getLogger());
-    jibExtension.handleDeprecatedParameters(gradleBuildLogger);
 
-    RegistryCredentials knownBaseRegistryCredentials = null;
-    Authorization fromAuthorization = jibExtension.getFrom().getImageAuthorization();
-    if (fromAuthorization != null) {
-      knownBaseRegistryCredentials = new RegistryCredentials("jib.from.auth", fromAuthorization);
+    // Check deprecated parameters
+    Path dockerExecutable = jibExtension.getDockerClient().getExecutablePath();
+    boolean isDockerInstalled =
+        dockerExecutable == null
+            ? DockerClient.isDefaultDockerInstalled()
+            : DockerClient.isDockerInstalled(dockerExecutable);
+    if (!isDockerInstalled) {
+      throw new GradleException(
+          HelpfulSuggestions.forDockerNotInstalled(HELPFUL_SUGGESTIONS_PREFIX));
     }
 
-    GradleProjectProperties gradleProjectProperties =
-        GradleProjectProperties.getForProject(getProject(), gradleBuildLogger);
-    String mainClass = gradleProjectProperties.getMainClass(jibExtension);
+    TaskCommon.disableHttpLogging();
+    TempDirectoryProvider tempDirectoryProvider = new TempDirectoryProvider();
 
-    ImageReference targetImage = getDockerTag(gradleBuildLogger);
-
-    // Builds the BuildConfiguration.
-    // TODO: Consolidate with BuildImageTask.
-    BuildConfiguration.Builder buildConfigurationBuilder =
-        BuildConfiguration.builder(gradleBuildLogger)
-            .setBaseImage(ImageReference.parse(jibExtension.getBaseImage()))
-            .setTargetImage(targetImage)
-            .setBaseImageCredentialHelperName(jibExtension.getFrom().getCredHelper())
-            .setKnownBaseRegistryCredentials(knownBaseRegistryCredentials)
-            .setMainClass(mainClass)
-            .setJavaArguments(jibExtension.getArgs())
-            .setJvmFlags(jibExtension.getJvmFlags())
-            .setExposedPorts(
-                ExposedPortsParser.parse(jibExtension.getExposedPorts(), gradleBuildLogger))
-            .setAllowHttp(jibExtension.getAllowInsecureRegistries());
-    CacheConfiguration applicationLayersCacheConfiguration =
-        CacheConfiguration.forPath(gradleProjectProperties.getCacheDirectory());
-    buildConfigurationBuilder.setApplicationLayersCacheConfiguration(
-        applicationLayersCacheConfiguration);
-    if (jibExtension.getUseOnlyProjectCache()) {
-      buildConfigurationBuilder.setBaseImageLayersCacheConfiguration(
-          applicationLayersCacheConfiguration);
-    }
-    BuildConfiguration buildConfiguration = buildConfigurationBuilder.build();
-
-    // TODO: Instead of disabling logging, have authentication credentials be provided
-    GradleBuildLogger.disableHttpLogging();
-
-    RegistryClient.setUserAgentSuffix(USER_AGENT_SUFFIX);
-
-    // Uses a directory in the Gradle build cache as the Jib cache.
+    GradleProjectProperties projectProperties =
+        GradleProjectProperties.getForProject(
+            getProject(),
+            getLogger(),
+            tempDirectoryProvider,
+            jibExtension.getConfigurationName().get());
+    GlobalConfig globalConfig = GlobalConfig.readConfig();
+    Future<Optional<String>> updateCheckFuture =
+        TaskCommon.newUpdateChecker(projectProperties, globalConfig, getLogger());
     try {
-      BuildStepsRunner.forBuildToDockerDaemon(
-              buildConfiguration, gradleProjectProperties.getSourceFilesConfiguration())
-          .build(HELPFUL_SUGGESTIONS);
 
-    } catch (CacheDirectoryCreationException | BuildStepsExecutionException ex) {
-      throw new GradleException(ex.getMessage(), ex.getCause());
+      PluginConfigurationProcessor.createJibBuildRunnerForDockerDaemonImage(
+              new GradleRawConfiguration(jibExtension),
+              ignored -> java.util.Optional.empty(),
+              projectProperties,
+              globalConfig,
+              new GradleHelpfulSuggestions(HELPFUL_SUGGESTIONS_PREFIX))
+          .runBuild();
+
+    } catch (InvalidAppRootException ex) {
+      throw new GradleException(
+          "container.appRoot is not an absolute Unix-style path: " + ex.getInvalidPathValue(), ex);
+
+    } catch (InvalidContainerizingModeException ex) {
+      throw new GradleException(
+          "invalid value for containerizingMode: " + ex.getInvalidContainerizingMode(), ex);
+
+    } catch (InvalidWorkingDirectoryException ex) {
+      throw new GradleException(
+          "container.workingDirectory is not an absolute Unix-style path: "
+              + ex.getInvalidPathValue(),
+          ex);
+
+    } catch (InvalidPlatformException ex) {
+      throw new GradleException(
+          "from.platforms contains a platform configuration that is missing required values or has invalid values: "
+              + ex.getMessage()
+              + ": "
+              + ex.getInvalidPlatform(),
+          ex);
+
+    } catch (InvalidContainerVolumeException ex) {
+      throw new GradleException(
+          "container.volumes is not an absolute Unix-style path: " + ex.getInvalidVolume(), ex);
+
+    } catch (InvalidFilesModificationTimeException ex) {
+      throw new GradleException(
+          "container.filesModificationTime should be an ISO 8601 date-time (see "
+              + "DateTimeFormatter.ISO_DATE_TIME) or special keyword \"EPOCH_PLUS_SECOND\": "
+              + ex.getInvalidFilesModificationTime(),
+          ex);
+
+    } catch (InvalidCreationTimeException ex) {
+      throw new GradleException(
+          "container.creationTime should be an ISO 8601 date-time (see "
+              + "DateTimeFormatter.ISO_DATE_TIME) or a special keyword (\"EPOCH\", "
+              + "\"USE_CURRENT_TIMESTAMP\"): "
+              + ex.getInvalidCreationTime(),
+          ex);
+
+    } catch (JibPluginExtensionException ex) {
+      String extensionName = ex.getExtensionClass().getName();
+      throw new GradleException(
+          "error running extension '" + extensionName + "': " + ex.getMessage(), ex);
+
+    } catch (IncompatibleBaseImageJavaVersionException ex) {
+      throw new GradleException(
+          HelpfulSuggestions.forIncompatibleBaseImageJavaVersionForGradle(
+              ex.getBaseImageMajorJavaVersion(), ex.getProjectMajorJavaVersion()),
+          ex);
+
+    } catch (InvalidImageReferenceException ex) {
+      throw new GradleException(
+          HelpfulSuggestions.forInvalidImageReference(ex.getInvalidReference()), ex);
+
+    } finally {
+      tempDirectoryProvider.close();
+      TaskCommon.finishUpdateChecker(projectProperties, updateCheckFuture);
+      projectProperties.waitForLoggingThread();
     }
   }
 
-  BuildDockerTask setJibExtension(JibExtension jibExtension) {
+  @Override
+  public BuildDockerTask setJibExtension(JibExtension jibExtension) {
     this.jibExtension = jibExtension;
     return this;
-  }
-
-  /**
-   * Returns an {@link ImageReference} parsed from the configured target image, or one of the form
-   * {@code project-name:project-version} if target image is not configured
-   *
-   * @param gradleBuildLogger the logger used to notify users of the target image parameter
-   * @return an {@link ImageReference} parsed from the configured target image, or one of the form
-   *     {@code project-name:project-version} if target image is not configured
-   */
-  ImageReference getDockerTag(GradleBuildLogger gradleBuildLogger)
-      throws InvalidImageReferenceException {
-    Preconditions.checkNotNull(jibExtension);
-    if (Strings.isNullOrEmpty(jibExtension.getTargetImage())) {
-      // TODO: Validate that project name and version are valid repository/tag
-      // TODO: Use HelpfulSuggestions
-      gradleBuildLogger.lifecycle(
-          "Tagging image with generated image reference "
-              + getProject().getName()
-              + ":"
-              + getProject().getVersion().toString()
-              + ". If you'd like to specify a different tag, you can set the jib.to.image "
-              + "parameter in your build.gradle, or use the --image=<MY IMAGE> commandline flag.");
-      return ImageReference.of(null, getProject().getName(), getProject().getVersion().toString());
-    } else {
-      return ImageReference.parse(jibExtension.getTargetImage());
-    }
   }
 }

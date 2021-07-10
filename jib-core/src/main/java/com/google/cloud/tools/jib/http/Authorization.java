@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,6 +16,10 @@
 
 package com.google.cloud.tools.jib.http;
 
+import com.google.api.client.util.Base64;
+import java.nio.charset.StandardCharsets;
+import java.util.Objects;
+
 /**
  * Holds the credentials for an HTTP {@code Authorization} header.
  *
@@ -25,10 +29,33 @@ package com.google.cloud.tools.jib.http;
  */
 public class Authorization {
 
+  /**
+   * Create an authentication from basic credentials.
+   *
+   * @param username the username
+   * @param secret the secret
+   * @return an {@link Authorization} with a {@code Basic} credentials
+   */
+  public static Authorization fromBasicCredentials(String username, String secret) {
+    String credentials = username + ":" + secret;
+    String token = Base64.encodeBase64String(credentials.getBytes(StandardCharsets.UTF_8));
+    return new Authorization("Basic", token);
+  }
+
+  /**
+   * Create an authentication from bearer token.
+   *
+   * @param token the token
+   * @return an {@link Authorization} with a {@code Bearer} token
+   */
+  public static Authorization fromBearerToken(String token) {
+    return new Authorization("Bearer", token);
+  }
+
   private final String scheme;
   private final String token;
 
-  Authorization(String scheme, String token) {
+  private Authorization(String scheme, String token) {
     this.scheme = scheme;
     this.token = token;
   }
@@ -45,5 +72,22 @@ public class Authorization {
   @Override
   public String toString() {
     return scheme + " " + token;
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (!(other instanceof Authorization)) {
+      return false;
+    }
+    Authorization otherAuthorization = (Authorization) other;
+    return scheme.equals(otherAuthorization.scheme) && token.equals(otherAuthorization.token);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(scheme, token);
   }
 }

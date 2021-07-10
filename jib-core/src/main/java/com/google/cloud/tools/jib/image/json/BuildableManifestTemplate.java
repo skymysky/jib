@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,17 +16,20 @@
 
 package com.google.cloud.tools.jib.image.json;
 
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import com.google.cloud.tools.jib.json.JsonTemplate;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import java.util.List;
+import java.util.Map;
 import javax.annotation.Nullable;
 
 /**
  * Parent class for image manifest JSON templates that can be built.
  *
- * @see V22ManifestTemplate for Docker V2.2 format
- * @see OCIManifestTemplate for OCI format
+ * @see V22ManifestTemplate Docker V2.2 format
+ * @see OciManifestTemplate OCI format
  */
 public interface BuildableManifestTemplate extends ManifestTemplate {
 
@@ -37,12 +40,16 @@ public interface BuildableManifestTemplate extends ManifestTemplate {
    * @see <a href="https://github.com/opencontainers/image-spec/blob/master/descriptor.md">OCI
    *     Content Descriptors</a>
    */
-  @VisibleForTesting
   class ContentDescriptorTemplate implements JsonTemplate {
 
-    @Nullable private String mediaType;
+    @SuppressWarnings("unused")
+    @Nullable
+    private String mediaType;
+
     @Nullable private DescriptorDigest digest;
     private long size;
+    @Nullable private List<String> urls;
+    @Nullable private Map<String, String> annotations;
 
     ContentDescriptorTemplate(String mediaType, long size, DescriptorDigest digest) {
       this.mediaType = mediaType;
@@ -51,6 +58,7 @@ public interface BuildableManifestTemplate extends ManifestTemplate {
     }
 
     /** Necessary for Jackson to create from JSON. */
+    @SuppressWarnings("unused")
     private ContentDescriptorTemplate() {}
 
     @VisibleForTesting
@@ -71,16 +79,49 @@ public interface BuildableManifestTemplate extends ManifestTemplate {
     void setDigest(DescriptorDigest digest) {
       this.digest = digest;
     }
+
+    @VisibleForTesting
+    @Nullable
+    public List<String> getUrls() {
+      return urls;
+    }
+
+    void setUrls(List<String> urls) {
+      this.urls = ImmutableList.copyOf(urls);
+    }
+
+    @VisibleForTesting
+    @Nullable
+    public Map<String, String> getAnnotations() {
+      return annotations;
+    }
+
+    void setAnnotations(Map<String, String> annotations) {
+      this.annotations = ImmutableMap.copyOf(annotations);
+    }
   }
 
-  /** @return the media type for this manifest, specific to the image format */
+  /**
+   * Returns the media type for this manifest, specific to the image format.
+   *
+   * @return the media type for this manifest, specific to the image format
+   */
+  @Override
   String getManifestMediaType();
 
-  /** @return the content descriptor of the container configuration */
+  /**
+   * Returns the content descriptor of the container configuration.
+   *
+   * @return the content descriptor of the container configuration
+   */
   @Nullable
   ContentDescriptorTemplate getContainerConfiguration();
 
-  /** @return an unmodifiable view of the layers */
+  /**
+   * Returns an unmodifiable view of the layers.
+   *
+   * @return an unmodifiable view of the layers
+   */
   List<ContentDescriptorTemplate> getLayers();
 
   /**

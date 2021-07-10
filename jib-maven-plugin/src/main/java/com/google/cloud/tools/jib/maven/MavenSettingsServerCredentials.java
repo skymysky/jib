@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,47 +16,114 @@
 
 package com.google.cloud.tools.jib.maven;
 
-import com.google.cloud.tools.jib.http.Authorizations;
-import com.google.cloud.tools.jib.registry.credentials.RegistryCredentials;
+import com.google.cloud.tools.jib.plugins.common.AuthProperty;
+import com.google.cloud.tools.jib.plugins.common.InferredAuthException;
+import com.google.cloud.tools.jib.plugins.common.InferredAuthProvider;
 import com.google.common.annotations.VisibleForTesting;
+import java.util.Optional;
 import javax.annotation.Nullable;
 import org.apache.maven.settings.Server;
 import org.apache.maven.settings.Settings;
+import org.apache.maven.settings.building.SettingsProblem;
+import org.apache.maven.settings.crypto.DefaultSettingsDecryptionRequest;
+import org.apache.maven.settings.crypto.SettingsDecrypter;
+import org.apache.maven.settings.crypto.SettingsDecryptionRequest;
+import org.apache.maven.settings.crypto.SettingsDecryptionResult;
 
 /**
  * Retrieves credentials for servers defined in <a
  * href="https://maven.apache.org/settings.html">Maven settings</a>.
  */
-class MavenSettingsServerCredentials {
+class MavenSettingsServerCredentials implements InferredAuthProvider {
 
-  @VisibleForTesting static final String CREDENTIAL_SOURCE = "Maven settings";
+  static final String CREDENTIAL_SOURCE = "Maven settings file";
 
   private final Settings settings;
+  private final SettingsDecrypter decrypter;
 
-  MavenSettingsServerCredentials(Settings settings) {
+  /**
+   * Create new instance.
+   *
+   * @param settings decrypted Maven settings
+   */
+  MavenSettingsServerCredentials(Settings settings, SettingsDecrypter decrypter) {
     this.settings = settings;
+    this.decrypter = decrypter;
   }
 
   /**
-   * Attempts to retrieve credentials for {@code registry} from Maven settings.
+   * Retrieves credentials for {@code registry} from Maven settings.
    *
    * @param registry the registry
-   * @return the credentials for the registry
+   * @return the auth info for the registry, or {@link Optional#empty} if none could be retrieved
    */
+  @Override
+  public Optional<AuthProperty> inferAuth(String registry) throws InferredAuthException {
+
+    Server server = getServerFromMavenSettings(registry);
+    if (server == null) {
+      return Optional.empty();
+    }
+
+    SettingsDecryptionRequest request = new DefaultSettingsDecryptionRequest(server);
+    SettingsDecryptionResult result = decrypter.decrypt(request);
+    // Un-encrypted passwords are passed through, so a problem indicates a real issue.
+    // If there are any ERROR or FATAL problems reported, then decryption failed.
+    for (SettingsProblem problem : result.getProblems()) {
+      if (problem.getSeverity() == SettingsProblem.Severity.ERROR
+          || problem.getSeverity() == SettingsProblem.Severity.FATAL) {
+        throw new InferredAuthException(
+            "Unable to decrypt server(" + registry + ") info from settings.xml: " + problem);
+      }
+    }
+    Server resultServer = result.getServer();
+
+    String username = resultServer.getUsername();
+    String password = resultServer.getPassword();
+
+    return Optional.of(
+        new AuthProperty() {
+
+          @Override
+          public String getUsername() {
+            return username;
+          }
+
+          @Override
+          public String getPassword() {
+            return password;
+          }
+
+          @Override
+          public String getAuthDescriptor() {
+            return CREDENTIAL_SOURCE;
+          }
+
+          @Override
+          public String getUsernameDescriptor() {
+            return CREDENTIAL_SOURCE;
+          }
+
+          @Override
+          public String getPasswordDescriptor() {
+            return CREDENTIAL_SOURCE;
+          }
+        });
+  }
+
   @Nullable
-  RegistryCredentials retrieve(@Nullable String registry) {
-    if (registry == null) {
-      return null;
+  @VisibleForTesting
+  Server getServerFromMavenSettings(String registry) {
+    Server server = settings.getServer(registry);
+    if (server != null) {
+      return server;
     }
 
-    Server registryServerSettings = settings.getServer(registry);
-    if (registryServerSettings == null) {
-      return null;
+    // try without port
+    int index = registry.lastIndexOf(':');
+    if (index != -1) {
+      return settings.getServer(registry.substring(0, index));
     }
-
-    return new RegistryCredentials(
-        CREDENTIAL_SOURCE,
-        Authorizations.withBasicCredentials(
-            registryServerSettings.getUsername(), registryServerSettings.getPassword()));
+    return null;
   }
 }

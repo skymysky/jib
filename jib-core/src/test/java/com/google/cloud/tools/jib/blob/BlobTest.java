@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,8 +16,9 @@
 
 package com.google.cloud.tools.jib.blob;
 
-import com.google.cloud.tools.jib.hash.CountingDigestOutputStream;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.hash.Digests;
+import com.google.cloud.tools.jib.hash.WritableContents;
 import com.google.common.io.Resources;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -31,7 +32,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import org.junit.Assert;
 import org.junit.Test;
-import org.mockito.Mockito;
 
 /** Tests for {@link Blob}. */
 public class BlobTest {
@@ -45,7 +45,7 @@ public class BlobTest {
 
   @Test
   public void testFromFile() throws IOException, URISyntaxException {
-    Path fileA = Paths.get(Resources.getResource("fileA").toURI());
+    Path fileA = Paths.get(Resources.getResource("core/fileA").toURI());
     String expected = new String(Files.readAllBytes(fileA), StandardCharsets.UTF_8);
     verifyBlobWriteTo(expected, Blobs.from(fileA));
   }
@@ -57,13 +57,13 @@ public class BlobTest {
   }
 
   @Test
-  public void testFromBlobWriter() throws IOException {
+  public void testFromWritableContents() throws IOException {
     String expected = "crepecake";
 
-    BlobWriter writer =
+    WritableContents writableContents =
         outputStream -> outputStream.write(expected.getBytes(StandardCharsets.UTF_8));
 
-    verifyBlobWriteTo(expected, Blobs.from(writer));
+    verifyBlobWriteTo(expected, Blobs.from(writableContents));
   }
 
   /** Checks that the {@link Blob} streams the expected string. */
@@ -77,10 +77,8 @@ public class BlobTest {
     byte[] expectedBytes = expected.getBytes(StandardCharsets.UTF_8);
     Assert.assertEquals(expectedBytes.length, blobDescriptor.getSize());
 
-    CountingDigestOutputStream countingDigestOutputStream =
-        new CountingDigestOutputStream(Mockito.mock(OutputStream.class));
-    countingDigestOutputStream.write(expectedBytes);
-    DescriptorDigest expectedDigest = countingDigestOutputStream.toBlobDescriptor().getDigest();
+    DescriptorDigest expectedDigest =
+        Digests.computeDigest(new ByteArrayInputStream(expectedBytes)).getDigest();
     Assert.assertEquals(expectedDigest, blobDescriptor.getDigest());
   }
 }

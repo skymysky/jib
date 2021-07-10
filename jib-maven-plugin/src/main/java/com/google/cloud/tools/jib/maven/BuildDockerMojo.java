@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,123 +16,160 @@
 
 package com.google.cloud.tools.jib.maven;
 
-import com.google.cloud.tools.jib.builder.BuildConfiguration;
-import com.google.cloud.tools.jib.cache.CacheDirectoryCreationException;
-import com.google.cloud.tools.jib.configuration.CacheConfiguration;
+import com.google.cloud.tools.jib.api.CacheDirectoryCreationException;
+import com.google.cloud.tools.jib.api.InvalidImageReferenceException;
 import com.google.cloud.tools.jib.docker.DockerClient;
-import com.google.cloud.tools.jib.frontend.BuildStepsExecutionException;
-import com.google.cloud.tools.jib.frontend.BuildStepsRunner;
-import com.google.cloud.tools.jib.frontend.ExposedPortsParser;
-import com.google.cloud.tools.jib.frontend.HelpfulSuggestions;
-import com.google.cloud.tools.jib.image.ImageReference;
-import com.google.cloud.tools.jib.registry.RegistryClient;
-import com.google.cloud.tools.jib.registry.credentials.RegistryCredentials;
+import com.google.cloud.tools.jib.filesystem.TempDirectoryProvider;
+import com.google.cloud.tools.jib.plugins.common.BuildStepsExecutionException;
+import com.google.cloud.tools.jib.plugins.common.HelpfulSuggestions;
+import com.google.cloud.tools.jib.plugins.common.IncompatibleBaseImageJavaVersionException;
+import com.google.cloud.tools.jib.plugins.common.InvalidAppRootException;
+import com.google.cloud.tools.jib.plugins.common.InvalidContainerVolumeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidContainerizingModeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidCreationTimeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidFilesModificationTimeException;
+import com.google.cloud.tools.jib.plugins.common.InvalidPlatformException;
+import com.google.cloud.tools.jib.plugins.common.InvalidWorkingDirectoryException;
+import com.google.cloud.tools.jib.plugins.common.MainClassInferenceException;
+import com.google.cloud.tools.jib.plugins.common.PluginConfigurationProcessor;
+import com.google.cloud.tools.jib.plugins.common.globalconfig.GlobalConfig;
+import com.google.cloud.tools.jib.plugins.common.globalconfig.InvalidGlobalConfigException;
+import com.google.cloud.tools.jib.plugins.extension.JibPluginExtensionException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
+import com.google.common.util.concurrent.Futures;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.Optional;
+import java.util.concurrent.Future;
 import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.ResolutionScope;
 
 /** Builds a container image and exports to the default Docker daemon. */
 @Mojo(
     name = BuildDockerMojo.GOAL_NAME,
-    requiresDependencyResolution = ResolutionScope.RUNTIME_PLUS_SYSTEM)
+    requiresDependencyResolution = ResolutionScope.RUNTIME_PLUS_SYSTEM,
+    threadSafe = true)
 public class BuildDockerMojo extends JibPluginConfiguration {
 
   @VisibleForTesting static final String GOAL_NAME = "dockerBuild";
-
-  /** {@code User-Agent} header suffix to send to the registry. */
-  private static final String USER_AGENT_SUFFIX = "jib-maven-plugin";
-
-  private static final HelpfulSuggestions HELPFUL_SUGGESTIONS =
-      HelpfulSuggestionsProvider.get("Build to Docker daemon failed");
+  private static final String HELPFUL_SUGGESTIONS_PREFIX = "Build to Docker daemon failed";
 
   @Override
-  public void execute() throws MojoExecutionException {
-    MavenBuildLogger mavenBuildLogger = new MavenBuildLogger(getLog());
-    handleDeprecatedParameters(mavenBuildLogger);
-
-    if (!new DockerClient().isDockerInstalled()) {
-      throw new MojoExecutionException(HELPFUL_SUGGESTIONS.forDockerNotInstalled());
+  public void execute() throws MojoExecutionException, MojoFailureException {
+    checkJibVersion();
+    if (MojoCommon.shouldSkipJibExecution(this)) {
+      return;
     }
 
-    // Parses 'from' and 'to' into image reference.
-    ImageReference baseImage = parseImageReference(getBaseImage(), "from");
-    ImageReference targetImage = getDockerTag(mavenBuildLogger);
-
-    // Checks Maven settings for registry credentials.
-    MavenSettingsServerCredentials mavenSettingsServerCredentials =
-        new MavenSettingsServerCredentials(Preconditions.checkNotNull(session).getSettings());
-    RegistryCredentials knownBaseRegistryCredentials =
-        mavenSettingsServerCredentials.retrieve(baseImage.getRegistry());
-
-    MavenProjectProperties mavenProjectProperties =
-        MavenProjectProperties.getForProject(getProject(), mavenBuildLogger);
-    String mainClass = mavenProjectProperties.getMainClass(this);
-
-    // Builds the BuildConfiguration.
-    // TODO: Consolidate with BuildImageMojo.
-    BuildConfiguration.Builder buildConfigurationBuilder =
-        BuildConfiguration.builder(mavenBuildLogger)
-            .setBaseImage(baseImage)
-            .setBaseImageCredentialHelperName(getBaseImageCredentialHelperName())
-            .setKnownBaseRegistryCredentials(knownBaseRegistryCredentials)
-            .setTargetImage(targetImage)
-            .setMainClass(mainClass)
-            .setJavaArguments(getArgs())
-            .setJvmFlags(getJvmFlags())
-            .setEnvironment(getEnvironment())
-            .setExposedPorts(ExposedPortsParser.parse(getExposedPorts(), mavenBuildLogger))
-            .setAllowHttp(getAllowInsecureRegistries());
-    CacheConfiguration applicationLayersCacheConfiguration =
-        CacheConfiguration.forPath(mavenProjectProperties.getCacheDirectory());
-    buildConfigurationBuilder.setApplicationLayersCacheConfiguration(
-        applicationLayersCacheConfiguration);
-    if (getUseOnlyProjectCache()) {
-      buildConfigurationBuilder.setBaseImageLayersCacheConfiguration(
-          applicationLayersCacheConfiguration);
+    Path dockerExecutable = getDockerClientExecutable();
+    boolean isDockerInstalled =
+        dockerExecutable == null
+            ? DockerClient.isDefaultDockerInstalled()
+            : DockerClient.isDockerInstalled(dockerExecutable);
+    if (!isDockerInstalled) {
+      throw new MojoExecutionException(
+          HelpfulSuggestions.forDockerNotInstalled(HELPFUL_SUGGESTIONS_PREFIX));
     }
-    BuildConfiguration buildConfiguration = buildConfigurationBuilder.build();
 
-    // TODO: Instead of disabling logging, have authentication credentials be provided
-    MavenBuildLogger.disableHttpLogging();
+    MavenSettingsProxyProvider.activateHttpAndHttpsProxies(
+        getSession().getSettings(), getSettingsDecrypter());
 
-    RegistryClient.setUserAgentSuffix(USER_AGENT_SUFFIX);
+    TempDirectoryProvider tempDirectoryProvider = new TempDirectoryProvider();
+    MavenProjectProperties projectProperties =
+        MavenProjectProperties.getForProject(
+            Preconditions.checkNotNull(descriptor),
+            getProject(),
+            getSession(),
+            getLog(),
+            tempDirectoryProvider,
+            getInjectedPluginExtensions());
 
+    Future<Optional<String>> updateCheckFuture = Futures.immediateFuture(Optional.empty());
     try {
-      BuildStepsRunner.forBuildToDockerDaemon(
-              buildConfiguration, mavenProjectProperties.getSourceFilesConfiguration())
-          .build(HELPFUL_SUGGESTIONS);
-      getLog().info("");
+      GlobalConfig globalConfig = GlobalConfig.readConfig();
+      updateCheckFuture = MojoCommon.newUpdateChecker(projectProperties, globalConfig, getLog());
 
-    } catch (CacheDirectoryCreationException | BuildStepsExecutionException ex) {
+      PluginConfigurationProcessor.createJibBuildRunnerForDockerDaemonImage(
+              new MavenRawConfiguration(this),
+              new MavenSettingsServerCredentials(
+                  getSession().getSettings(), getSettingsDecrypter()),
+              projectProperties,
+              globalConfig,
+              new MavenHelpfulSuggestions(HELPFUL_SUGGESTIONS_PREFIX))
+          .runBuild();
+
+    } catch (InvalidAppRootException ex) {
+      throw new MojoExecutionException(
+          "<container><appRoot> is not an absolute Unix-style path: " + ex.getInvalidPathValue(),
+          ex);
+
+    } catch (InvalidContainerizingModeException ex) {
+      throw new MojoExecutionException(
+          "invalid value for <containerizingMode>: " + ex.getInvalidContainerizingMode(), ex);
+
+    } catch (InvalidWorkingDirectoryException ex) {
+      throw new MojoExecutionException(
+          "<container><workingDirectory> is not an absolute Unix-style path: "
+              + ex.getInvalidPathValue(),
+          ex);
+    } catch (InvalidPlatformException ex) {
+      throw new MojoExecutionException(
+          "<from><platforms> contains a platform configuration that is missing required values or has invalid values: "
+              + ex.getMessage()
+              + ": "
+              + ex.getInvalidPlatform(),
+          ex);
+    } catch (InvalidContainerVolumeException ex) {
+      throw new MojoExecutionException(
+          "<container><volumes> is not an absolute Unix-style path: " + ex.getInvalidVolume(), ex);
+
+    } catch (InvalidFilesModificationTimeException ex) {
+      throw new MojoExecutionException(
+          "<container><filesModificationTime> should be an ISO 8601 date-time (see "
+              + "DateTimeFormatter.ISO_DATE_TIME) or special keyword \"EPOCH_PLUS_SECOND\": "
+              + ex.getInvalidFilesModificationTime(),
+          ex);
+
+    } catch (InvalidCreationTimeException ex) {
+      throw new MojoExecutionException(
+          "<container><creationTime> should be an ISO 8601 date-time (see "
+              + "DateTimeFormatter.ISO_DATE_TIME) or a special keyword (\"EPOCH\", "
+              + "\"USE_CURRENT_TIMESTAMP\"): "
+              + ex.getInvalidCreationTime(),
+          ex);
+
+    } catch (JibPluginExtensionException ex) {
+      String extensionName = ex.getExtensionClass().getName();
+      throw new MojoExecutionException(
+          "error running extension '" + extensionName + "': " + ex.getMessage(), ex);
+
+    } catch (IncompatibleBaseImageJavaVersionException ex) {
+      throw new MojoExecutionException(
+          HelpfulSuggestions.forIncompatibleBaseImageJavaVersionForMaven(
+              ex.getBaseImageMajorJavaVersion(), ex.getProjectMajorJavaVersion()),
+          ex);
+
+    } catch (InvalidImageReferenceException ex) {
+      throw new MojoExecutionException(
+          HelpfulSuggestions.forInvalidImageReference(ex.getInvalidReference()), ex);
+
+    } catch (IOException
+        | CacheDirectoryCreationException
+        | MainClassInferenceException
+        | InvalidGlobalConfigException ex) {
+      throw new MojoExecutionException(ex.getMessage(), ex);
+
+    } catch (BuildStepsExecutionException ex) {
       throw new MojoExecutionException(ex.getMessage(), ex.getCause());
-    }
-  }
 
-  /**
-   * Returns an {@link ImageReference} parsed from the configured target image, or one of the form
-   * {@code project-name:project-version} if target image is not configured
-   *
-   * @param mavenBuildLogger the logger used to notify users of the target image parameter
-   * @return an {@link ImageReference} parsed from the configured target image, or one of the form
-   *     {@code project-name:project-version} if target image is not configured
-   */
-  ImageReference getDockerTag(MavenBuildLogger mavenBuildLogger) {
-    if (Strings.isNullOrEmpty(getTargetImage())) {
-      // TODO: Validate that project name and version are valid repository/tag
-      // TODO: Use HelpfulSuggestions
-      mavenBuildLogger.lifecycle(
-          "Tagging image with generated image reference "
-              + getProject().getName()
-              + ":"
-              + getProject().getVersion()
-              + ". If you'd like to specify a different tag, you can set the <to><image> parameter "
-              + "in your pom.xml, or use the -Dimage=<MY IMAGE> commandline flag.");
-      return ImageReference.of(null, getProject().getName(), getProject().getVersion());
-    } else {
-      return parseImageReference(getTargetImage(), "to");
+    } finally {
+      tempDirectoryProvider.close();
+      MojoCommon.finishUpdateChecker(projectProperties, updateCheckFuture);
+      projectProperties.waitForLoggingThread();
+      getLog().info("");
     }
   }
 }
