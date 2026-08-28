@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,67 +16,107 @@
 
 package com.google.cloud.tools.jib.maven;
 
-import com.google.cloud.tools.jib.http.Authorization;
-import com.google.cloud.tools.jib.http.Authorizations;
-import com.google.cloud.tools.jib.registry.credentials.RegistryCredentials;
-import org.apache.maven.settings.Server;
-import org.apache.maven.settings.Settings;
+import com.google.cloud.tools.jib.plugins.common.AuthProperty;
+import com.google.cloud.tools.jib.plugins.common.InferredAuthException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Optional;
+import org.hamcrest.CoreMatchers;
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.mockito.Mock;
-import org.mockito.Mockito;
-import org.mockito.junit.MockitoJUnitRunner;
 
 /** Tests for {@link MavenSettingsServerCredentials}. */
-@RunWith(MockitoJUnitRunner.class)
 public class MavenSettingsServerCredentialsTest {
 
-  @Mock private Settings mockSettings;
-  @Mock private Server mockServer1;
-
-  private MavenSettingsServerCredentials testMavenSettingsServerCredentials;
+  private MavenSettingsServerCredentials mavenSettingsServerCredentialsNoMasterPassword;
+  private MavenSettingsServerCredentials mavenSettingsServerCredentials;
+  private Path testSettings = Paths.get("src/test/resources/maven/settings/settings.xml");
+  private Path testSettingsSecurity =
+      Paths.get("src/test/resources/maven/settings/settings-security.xml");
+  private Path testSettingsSecurityEmpty =
+      Paths.get("src/test/resources/maven/settings/settings-security.empty.xml");
 
   @Before
   public void setUp() {
-    testMavenSettingsServerCredentials = new MavenSettingsServerCredentials(mockSettings);
+    mavenSettingsServerCredentials =
+        new MavenSettingsServerCredentials(
+            SettingsFixture.newSettings(testSettings),
+            SettingsFixture.newSettingsDecrypter(testSettingsSecurity));
+    mavenSettingsServerCredentialsNoMasterPassword =
+        new MavenSettingsServerCredentials(
+            SettingsFixture.newSettings(testSettings),
+            SettingsFixture.newSettingsDecrypter(testSettingsSecurityEmpty));
   }
 
   @Test
-  public void testRetrieve_found() {
-    Mockito.when(mockSettings.getServer("server1")).thenReturn(mockServer1);
-
-    Mockito.when(mockServer1.getUsername()).thenReturn("server1 username");
-    Mockito.when(mockServer1.getPassword()).thenReturn("server1 password");
-
-    RegistryCredentials registryCredentials =
-        testMavenSettingsServerCredentials.retrieve("server1");
-
-    Assert.assertNotNull(registryCredentials);
-    Assert.assertEquals(
-        MavenSettingsServerCredentials.CREDENTIAL_SOURCE,
-        registryCredentials.getCredentialSource());
-
-    Authorization retrievedServer1Authorization = registryCredentials.getAuthorization();
-    Assert.assertNotNull(retrievedServer1Authorization);
-    Assert.assertEquals(
-        Authorizations.withBasicCredentials("server1 username", "server1 password").toString(),
-        retrievedServer1Authorization.toString());
+  public void testInferredAuth_decrypterFailure() {
+    try {
+      mavenSettingsServerCredentials.inferAuth("badServer");
+      Assert.fail();
+    } catch (InferredAuthException ex) {
+      MatcherAssert.assertThat(
+          ex.getMessage(),
+          CoreMatchers.startsWith("Unable to decrypt server(badServer) info from settings.xml:"));
+    }
   }
 
   @Test
-  public void testRetrieve_notFound() {
-    RegistryCredentials registryCredentials =
-        testMavenSettingsServerCredentials.retrieve("serverUnknown");
-
-    Assert.assertNull(registryCredentials);
+  public void testInferredAuth_successEncrypted() throws InferredAuthException {
+    Optional<AuthProperty> auth = mavenSettingsServerCredentials.inferAuth("encryptedServer");
+    Assert.assertTrue(auth.isPresent());
+    Assert.assertEquals("encryptedUser", auth.get().getUsername());
+    Assert.assertEquals("password1", auth.get().getPassword());
   }
 
   @Test
-  public void testRetrieve_withNullServer() {
-    RegistryCredentials registryCredentials = testMavenSettingsServerCredentials.retrieve(null);
+  public void testInferredAuth_successUnencrypted() throws InferredAuthException {
+    Optional<AuthProperty> auth = mavenSettingsServerCredentials.inferAuth("simpleServer");
+    Assert.assertTrue(auth.isPresent());
+    Assert.assertEquals("simpleUser", auth.get().getUsername());
+    Assert.assertEquals("password2", auth.get().getPassword());
+  }
 
-    Assert.assertNull(registryCredentials);
+  @Test
+  public void testInferredAuth_successNoPasswordDoesNotBlowUp() throws InferredAuthException {
+    Optional<AuthProperty> auth =
+        mavenSettingsServerCredentialsNoMasterPassword.inferAuth("simpleServer");
+    Assert.assertTrue(auth.isPresent());
+    Assert.assertEquals("simpleUser", auth.get().getUsername());
+    Assert.assertEquals("password2", auth.get().getPassword());
+  }
+
+  @Test
+  public void testInferredAuth_registryWithHostAndPort() throws InferredAuthException {
+    Optional<AuthProperty> auth =
+        mavenSettingsServerCredentialsNoMasterPassword.inferAuth("docker.example.com:8080");
+    Assert.assertTrue(auth.isPresent());
+    Assert.assertEquals("registryUser", auth.get().getUsername());
+    Assert.assertEquals("registryPassword", auth.get().getPassword());
+  }
+
+  @Test
+  public void testInferredAuth_registryWithHostWithoutPort() throws InferredAuthException {
+    Optional<AuthProperty> auth =
+        mavenSettingsServerCredentialsNoMasterPassword.inferAuth("docker.example.com");
+    Assert.assertTrue(auth.isPresent());
+    Assert.assertEquals("registryUser", auth.get().getUsername());
+    Assert.assertEquals("registryPassword", auth.get().getPassword());
+  }
+
+  @Test
+  public void testInferredAuth_registrySettingsWithPort() throws InferredAuthException {
+    // Attempt to resolve WITHOUT the port. Should work as well.
+    Optional<AuthProperty> auth =
+        mavenSettingsServerCredentialsNoMasterPassword.inferAuth("docker.example.com:5432");
+    Assert.assertTrue(auth.isPresent());
+    Assert.assertEquals("registryUser", auth.get().getUsername());
+    Assert.assertEquals("registryPassword", auth.get().getPassword());
+  }
+
+  @Test
+  public void testInferredAuth_notFound() throws InferredAuthException {
+    Assert.assertFalse(mavenSettingsServerCredentials.inferAuth("serverUnknown").isPresent());
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,83 +16,59 @@
 
 package com.google.cloud.tools.jib.builder.steps;
 
-import com.google.cloud.tools.jib.Timer;
-import com.google.cloud.tools.jib.async.AsyncStep;
-import com.google.cloud.tools.jib.async.NonBlockingSteps;
-import com.google.cloud.tools.jib.blob.Blob;
+import com.google.cloud.tools.jib.api.RegistryException;
 import com.google.cloud.tools.jib.blob.BlobDescriptor;
-import com.google.cloud.tools.jib.builder.BuildConfiguration;
-import com.google.cloud.tools.jib.cache.CachedLayer;
-import com.google.cloud.tools.jib.hash.CountingDigestOutputStream;
+import com.google.cloud.tools.jib.blob.Blobs;
+import com.google.cloud.tools.jib.builder.ProgressEventDispatcher;
+import com.google.cloud.tools.jib.builder.TimerEventDispatcher;
+import com.google.cloud.tools.jib.configuration.BuildContext;
+import com.google.cloud.tools.jib.hash.Digests;
 import com.google.cloud.tools.jib.image.Image;
 import com.google.cloud.tools.jib.image.json.ImageToJsonTranslator;
-import com.google.common.io.ByteStreams;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.cloud.tools.jib.json.JsonTemplate;
+import com.google.cloud.tools.jib.registry.RegistryClient;
 import java.io.IOException;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 
 /** Pushes the container configuration. */
-class PushContainerConfigurationStep
-    implements AsyncStep<AsyncStep<PushBlobStep>>, Callable<AsyncStep<PushBlobStep>> {
+class PushContainerConfigurationStep implements Callable<BlobDescriptor> {
 
   private static final String DESCRIPTION = "Pushing container configuration";
 
-  private final BuildConfiguration buildConfiguration;
-  private final AuthenticatePushStep authenticatePushStep;
-  private final BuildImageStep buildImageStep;
+  private final BuildContext buildContext;
+  private final ProgressEventDispatcher.Factory progressEventDispatcherFactory;
 
-  private final ListeningExecutorService listeningExecutorService;
-  private final ListenableFuture<AsyncStep<PushBlobStep>> listenableFuture;
+  private final RegistryClient registryClient;
+  private final Image builtImage;
 
   PushContainerConfigurationStep(
-      ListeningExecutorService listeningExecutorService,
-      BuildConfiguration buildConfiguration,
-      AuthenticatePushStep authenticatePushStep,
-      BuildImageStep buildImageStep) {
-    this.listeningExecutorService = listeningExecutorService;
-    this.buildConfiguration = buildConfiguration;
-    this.authenticatePushStep = authenticatePushStep;
-    this.buildImageStep = buildImageStep;
-
-    listenableFuture =
-        Futures.whenAllSucceed(buildImageStep.getFuture()).call(this, listeningExecutorService);
+      BuildContext buildContext,
+      ProgressEventDispatcher.Factory progressEventDispatcherFactory,
+      RegistryClient registryClient,
+      Image builtImage) {
+    this.buildContext = buildContext;
+    this.progressEventDispatcherFactory = progressEventDispatcherFactory;
+    this.registryClient = registryClient;
+    this.builtImage = builtImage;
   }
 
   @Override
-  public ListenableFuture<AsyncStep<PushBlobStep>> getFuture() {
-    return listenableFuture;
-  }
-
-  @Override
-  public AsyncStep<PushBlobStep> call() throws ExecutionException {
-    ListenableFuture<PushBlobStep> pushBlobStepFuture =
-        Futures.whenAllSucceed(
-                authenticatePushStep.getFuture(), NonBlockingSteps.get(buildImageStep).getFuture())
-            .call(this::afterBuildConfigurationFutureFuture, listeningExecutorService);
-    return () -> pushBlobStepFuture;
-  }
-
-  private PushBlobStep afterBuildConfigurationFutureFuture()
-      throws ExecutionException, IOException {
-    try (Timer timer = new Timer(buildConfiguration.getBuildLogger(), DESCRIPTION)) {
-      Image<CachedLayer> image = NonBlockingSteps.get(NonBlockingSteps.get(buildImageStep));
-      Blob containerConfigurationBlob =
-          new ImageToJsonTranslator(image).getContainerConfigurationBlob();
-      CountingDigestOutputStream digestOutputStream =
-          new CountingDigestOutputStream(ByteStreams.nullOutputStream());
-      containerConfigurationBlob.writeTo(digestOutputStream);
-
-      BlobDescriptor blobDescriptor = digestOutputStream.toBlobDescriptor();
+  public BlobDescriptor call() throws IOException, RegistryException {
+    try (ProgressEventDispatcher progressEventDispatcher =
+            progressEventDispatcherFactory.create("pushing container configuration", 1);
+        TimerEventDispatcher ignored =
+            new TimerEventDispatcher(buildContext.getEventHandlers(), DESCRIPTION)) {
+      JsonTemplate containerConfiguration =
+          new ImageToJsonTranslator(builtImage).getContainerConfiguration();
 
       return new PushBlobStep(
-          listeningExecutorService,
-          buildConfiguration,
-          authenticatePushStep,
-          blobDescriptor,
-          containerConfigurationBlob);
+              buildContext,
+              progressEventDispatcher.newChildProducer(),
+              registryClient,
+              Digests.computeDigest(containerConfiguration),
+              Blobs.from(containerConfiguration),
+              false)
+          .call();
     }
   }
 }

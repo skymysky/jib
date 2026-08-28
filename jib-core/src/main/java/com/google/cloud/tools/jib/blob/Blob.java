@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -30,4 +30,12 @@ public interface Blob {
    * @throws IOException if writing the BLOB fails
    */
   BlobDescriptor writeTo(OutputStream outputStream) throws IOException;
+
+  /**
+   * Whether {@link #writeTo(OutputStream)} is retryable.
+   *
+   * @return {@code true} if {@link #writeTo(OutputStream)} can be called multiple times. {@code
+   *     false} otherwise.
+   */
+  boolean isRetryable();
 }

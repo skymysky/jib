@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,32 +16,44 @@
 
 package com.google.cloud.tools.jib.maven;
 
+import com.google.cloud.tools.jib.filesystem.DirectoryWalker;
 import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Properties;
 import org.apache.maven.it.util.ResourceExtractor;
 import org.junit.rules.TemporaryFolder;
 
 /** Works with the test Maven projects in the {@code resources/projects} directory. */
-class TestProject extends TemporaryFolder implements Closeable {
+public class TestProject extends TemporaryFolder implements Closeable {
 
-  private static final String PROJECTS_PATH_IN_RESOURCES = "/projects/";
+  private static final String PROJECTS_PATH_IN_RESOURCES = "/maven/projects/";
 
-  private final TestPlugin testPlugin;
+  private static boolean isPomXml(Path path) {
+    String filename = path.getFileName().toString();
+    return filename.startsWith("pom") && filename.endsWith(".xml");
+  }
+
   private final String projectDir;
 
   private Path projectRoot;
 
   /** Initialize to a specific project directory. */
-  TestProject(TestPlugin testPlugin, String projectDir) {
-    this.testPlugin = testPlugin;
+  public TestProject(String projectDir) {
     this.projectDir = projectDir;
   }
 
-  Path getProjectRoot() {
-    return projectRoot;
+  /** Gets the project root resolved as a real path. */
+  public Path getProjectRoot() throws IOException {
+    return projectRoot.toRealPath();
+  }
+
+  @Override
+  public void close() {
+    after();
   }
 
   @Override
@@ -58,16 +70,19 @@ class TestProject extends TemporaryFolder implements Closeable {
             .toPath();
 
     // Puts the correct plugin version into the test project pom.xml.
-    Path pomXml = projectRoot.resolve("pom.xml");
-    Files.write(
-        pomXml,
-        new String(Files.readAllBytes(pomXml), StandardCharsets.UTF_8)
-            .replace("@@PluginVersion@@", testPlugin.getVersion())
-            .getBytes(StandardCharsets.UTF_8));
-  }
+    Path gradleProperties = Paths.get("gradle.properties");
+    Properties properties = new Properties();
+    properties.load(Files.newInputStream(gradleProperties));
+    String pluginVersion = properties.getProperty("version");
 
-  @Override
-  public void close() {
-    after();
+    new DirectoryWalker(projectRoot)
+        .filter(TestProject::isPomXml)
+        .walk(
+            pomXml ->
+                Files.write(
+                    pomXml,
+                    new String(Files.readAllBytes(pomXml), StandardCharsets.UTF_8)
+                        .replace("@@PluginVersion@@", pluginVersion)
+                        .getBytes(StandardCharsets.UTF_8)));
   }
 }

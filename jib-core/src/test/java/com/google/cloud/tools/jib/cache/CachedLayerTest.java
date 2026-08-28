@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,17 +16,11 @@
 
 package com.google.cloud.tools.jib.cache;
 
-import com.google.cloud.tools.jib.blob.Blob;
-import com.google.cloud.tools.jib.blob.BlobDescriptor;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
-import com.google.common.io.Resources;
-import java.io.ByteArrayOutputStream;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.blob.Blobs;
 import java.io.IOException;
-import java.net.URISyntaxException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import org.hamcrest.CoreMatchers;
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -37,33 +31,50 @@ import org.mockito.junit.MockitoJUnitRunner;
 @RunWith(MockitoJUnitRunner.class)
 public class CachedLayerTest {
 
-  @Mock private Path mockPath;
-  @Mock private BlobDescriptor mockBlobDescriptor;
-  @Mock private DescriptorDigest mockDiffId;
+  @Mock private DescriptorDigest mockLayerDigest;
+  @Mock private DescriptorDigest mockLayerDiffId;
 
   @Test
-  public void testNew() {
-    CachedLayer layer = new CachedLayer(mockPath, mockBlobDescriptor, mockDiffId);
+  public void testBuilder_fail() {
+    try {
+      CachedLayer.builder().build();
+      Assert.fail("missing required");
 
-    Assert.assertEquals(mockPath, layer.getContentFile());
-    Assert.assertEquals(mockBlobDescriptor, layer.getBlobDescriptor());
-    Assert.assertEquals(mockDiffId, layer.getDiffId());
+    } catch (NullPointerException ex) {
+      MatcherAssert.assertThat(ex.getMessage(), CoreMatchers.containsString("layerDigest"));
+    }
+
+    try {
+      CachedLayer.builder().setLayerDigest(mockLayerDigest).build();
+      Assert.fail("missing required");
+
+    } catch (NullPointerException ex) {
+      MatcherAssert.assertThat(ex.getMessage(), CoreMatchers.containsString("layerDiffId"));
+    }
+
+    try {
+      CachedLayer.builder().setLayerDigest(mockLayerDigest).setLayerDiffId(mockLayerDiffId).build();
+      Assert.fail("missing required");
+
+    } catch (NullPointerException ex) {
+      MatcherAssert.assertThat(ex.getMessage(), CoreMatchers.containsString("layerBlob"));
+    }
   }
 
   @Test
-  public void testGetBlob() throws URISyntaxException, IOException {
-    Path fileA = Paths.get(Resources.getResource("fileA").toURI());
-    String expectedFileAString = new String(Files.readAllBytes(fileA), StandardCharsets.UTF_8);
-
-    CachedLayer cachedLayer = new CachedLayer(fileA, mockBlobDescriptor, mockDiffId);
-
-    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
-    Blob fileBlob = cachedLayer.getBlob();
-    fileBlob.writeTo(outputStream);
-
-    Assert.assertEquals(
-        expectedFileAString, new String(outputStream.toByteArray(), StandardCharsets.UTF_8));
-    Assert.assertEquals(mockBlobDescriptor, cachedLayer.getBlobDescriptor());
-    Assert.assertEquals(mockDiffId, cachedLayer.getDiffId());
+  public void testBuilder_pass() throws IOException {
+    CachedLayer.Builder cachedLayerBuilder =
+        CachedLayer.builder()
+            .setLayerDigest(mockLayerDigest)
+            .setLayerDiffId(mockLayerDiffId)
+            .setLayerSize(1337);
+    Assert.assertFalse(cachedLayerBuilder.hasLayerBlob());
+    cachedLayerBuilder.setLayerBlob(Blobs.from("layerBlob"));
+    Assert.assertTrue(cachedLayerBuilder.hasLayerBlob());
+    CachedLayer cachedLayer = cachedLayerBuilder.build();
+    Assert.assertEquals(mockLayerDigest, cachedLayer.getDigest());
+    Assert.assertEquals(mockLayerDiffId, cachedLayer.getDiffId());
+    Assert.assertEquals(1337, cachedLayer.getSize());
+    Assert.assertEquals("layerBlob", Blobs.writeToString(cachedLayer.getBlob()));
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,66 +17,68 @@
 package com.google.cloud.tools.jib.registry.credentials;
 
 import com.google.cloud.tools.jib.Command;
-import com.google.cloud.tools.jib.http.Authorization;
+import com.google.cloud.tools.jib.api.Credential;
 import com.google.common.io.Resources;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import org.hamcrest.CoreMatchers;
+import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.Test;
 
 /** Integration tests for {@link DockerCredentialHelper}. */
 public class DockerCredentialHelperIntegrationTest {
 
+  // This binary must exist and be functioning properly for these tests to succeed.
+  private static final String GCR_CREDENTIAL_HELPER = "docker-credential-gcr";
+
   /** Tests retrieval via {@code docker-credential-gcr} CLI. */
   @Test
-  public void testRetrieveGCR()
-      throws IOException, NonexistentServerUrlDockerCredentialHelperException,
-          NonexistentDockerCredentialHelperException, URISyntaxException, InterruptedException {
-    new Command("docker-credential-gcr", "store")
+  public void testRetrieveGcr()
+      throws IOException, CredentialHelperUnhandledServerUrlException,
+          CredentialHelperNotFoundException, URISyntaxException, InterruptedException {
+    new Command(GCR_CREDENTIAL_HELPER, "store")
         .run(Files.readAllBytes(Paths.get(Resources.getResource("credentials.json").toURI())));
 
     DockerCredentialHelper dockerCredentialHelper =
-        new DockerCredentialHelperFactory("myregistry").withCredentialHelperSuffix("gcr");
+        new DockerCredentialHelper("myregistry", Paths.get(GCR_CREDENTIAL_HELPER));
 
-    Authorization authorization = dockerCredentialHelper.retrieve();
-
-    // Checks that token received was base64 encoding of "myusername:mysecret".
-    Assert.assertEquals("bXl1c2VybmFtZTpteXNlY3JldA==", authorization.getToken());
+    Credential credentials = dockerCredentialHelper.retrieve();
+    Assert.assertEquals("myusername", credentials.getUsername());
+    Assert.assertEquals("mysecret", credentials.getPassword());
   }
 
   @Test
   public void testRetrieve_nonexistentCredentialHelper()
-      throws IOException, NonexistentServerUrlDockerCredentialHelperException {
+      throws IOException, CredentialHelperUnhandledServerUrlException {
     try {
       DockerCredentialHelper fakeDockerCredentialHelper =
-          new DockerCredentialHelperFactory("").withCredentialHelperSuffix("fake-cloud-provider");
+          new DockerCredentialHelper("", Paths.get("non-existing-helper"));
 
       fakeDockerCredentialHelper.retrieve();
 
       Assert.fail("Retrieve should have failed for nonexistent credential helper");
 
-    } catch (NonexistentDockerCredentialHelperException ex) {
-      Assert.assertEquals(
-          "The system does not have docker-credential-fake-cloud-provider CLI", ex.getMessage());
+    } catch (CredentialHelperNotFoundException ex) {
+      Assert.assertEquals("The system does not have non-existing-helper CLI", ex.getMessage());
     }
   }
 
   @Test
   public void testRetrieve_nonexistentServerUrl()
-      throws IOException, NonexistentDockerCredentialHelperException {
+      throws IOException, CredentialHelperNotFoundException {
     try {
       DockerCredentialHelper fakeDockerCredentialHelper =
-          new DockerCredentialHelperFactory("fake.server.url").withCredentialHelperSuffix("gcr");
+          new DockerCredentialHelper("fake.server.url", Paths.get(GCR_CREDENTIAL_HELPER));
 
       fakeDockerCredentialHelper.retrieve();
 
       Assert.fail("Retrieve should have failed for nonexistent server URL");
 
-    } catch (NonexistentServerUrlDockerCredentialHelperException ex) {
-      Assert.assertThat(
+    } catch (CredentialHelperUnhandledServerUrlException ex) {
+      MatcherAssert.assertThat(
           ex.getMessage(),
           CoreMatchers.containsString(
               "The credential helper (docker-credential-gcr) has nothing for server URL: fake.server.url"));

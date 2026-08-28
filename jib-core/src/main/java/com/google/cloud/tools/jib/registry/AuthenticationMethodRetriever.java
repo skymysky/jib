@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -17,24 +17,34 @@
 package com.google.cloud.tools.jib.registry;
 
 import com.google.api.client.http.HttpMethods;
-import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpStatusCodes;
+import com.google.cloud.tools.jib.api.RegistryAuthenticationFailedException;
 import com.google.cloud.tools.jib.http.BlobHttpContent;
+import com.google.cloud.tools.jib.http.FailoverHttpClient;
 import com.google.cloud.tools.jib.http.Response;
+import com.google.cloud.tools.jib.http.ResponseException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import javax.annotation.Nullable;
 
 /** Retrieves the {@code WWW-Authenticate} header from the registry API. */
-class AuthenticationMethodRetriever implements RegistryEndpointProvider<RegistryAuthenticator> {
+class AuthenticationMethodRetriever
+    implements RegistryEndpointProvider<Optional<RegistryAuthenticator>> {
 
   private final RegistryEndpointRequestProperties registryEndpointRequestProperties;
+  @Nullable private final String userAgent;
+  private final FailoverHttpClient httpClient;
 
   AuthenticationMethodRetriever(
-      RegistryEndpointRequestProperties registryEndpointRequestProperties) {
+      RegistryEndpointRequestProperties registryEndpointRequestProperties,
+      @Nullable String userAgent,
+      FailoverHttpClient httpClient) {
     this.registryEndpointRequestProperties = registryEndpointRequestProperties;
+    this.userAgent = userAgent;
+    this.httpClient = httpClient;
   }
 
   @Nullable
@@ -52,12 +62,11 @@ class AuthenticationMethodRetriever implements RegistryEndpointProvider<Registry
    * The request did not error, meaning that the registry does not require authentication.
    *
    * @param response ignored
-   * @return {@code null}
+   * @return {@link Optional#empty()}
    */
   @Override
-  @Nullable
-  public RegistryAuthenticator handleResponse(Response response) {
-    return null;
+  public Optional<RegistryAuthenticator> handleResponse(Response response) {
+    return Optional.empty();
   }
 
   @Override
@@ -76,19 +85,17 @@ class AuthenticationMethodRetriever implements RegistryEndpointProvider<Registry
   }
 
   @Override
-  @Nullable
-  public RegistryAuthenticator handleHttpResponseException(
-      HttpResponseException httpResponseException)
-      throws HttpResponseException, RegistryErrorException {
+  public Optional<RegistryAuthenticator> handleHttpResponseException(
+      ResponseException responseException) throws ResponseException, RegistryErrorException {
     // Only valid for status code of '401 Unauthorized'.
-    if (httpResponseException.getStatusCode() != HttpStatusCodes.STATUS_CODE_UNAUTHORIZED) {
-      throw httpResponseException;
+    if (responseException.getStatusCode() != HttpStatusCodes.STATUS_CODE_UNAUTHORIZED) {
+      throw responseException;
     }
 
     // Checks if the 'WWW-Authenticate' header is present.
-    String authenticationMethod = httpResponseException.getHeaders().getAuthenticate();
+    String authenticationMethod = responseException.getHeaders().getAuthenticate();
     if (authenticationMethod == null) {
-      throw new RegistryErrorExceptionBuilder(getActionDescription(), httpResponseException)
+      throw new RegistryErrorExceptionBuilder(getActionDescription(), responseException)
           .addReason("'WWW-Authenticate' header not found")
           .build();
     }
@@ -96,7 +103,7 @@ class AuthenticationMethodRetriever implements RegistryEndpointProvider<Registry
     // Parses the header to retrieve the components.
     try {
       return RegistryAuthenticator.fromAuthenticationMethod(
-          authenticationMethod, registryEndpointRequestProperties.getImageName());
+          authenticationMethod, registryEndpointRequestProperties, userAgent, httpClient);
 
     } catch (RegistryAuthenticationFailedException ex) {
       throw new RegistryErrorExceptionBuilder(getActionDescription(), ex)

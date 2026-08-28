@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,15 +16,19 @@
 
 package com.google.cloud.tools.jib.image;
 
+import static com.google.common.truth.Truth.assertThat;
+
+import com.google.cloud.tools.jib.api.buildplan.AbsoluteUnixPath;
+import com.google.cloud.tools.jib.api.buildplan.FileEntriesLayer;
+import com.google.cloud.tools.jib.api.buildplan.FileEntry;
+import com.google.cloud.tools.jib.api.buildplan.FilePermissions;
 import com.google.cloud.tools.jib.blob.Blob;
 import com.google.cloud.tools.jib.blob.Blobs;
-import com.google.cloud.tools.jib.filesystem.DirectoryWalker;
 import com.google.common.collect.ImmutableList;
-import com.google.common.io.CharStreams;
+import com.google.common.io.ByteStreams;
 import com.google.common.io.Resources;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
@@ -33,20 +37,14 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
-import java.util.Arrays;
-import java.util.Collections;
+import java.time.Instant;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
-import org.hamcrest.CoreMatchers;
-import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.mockito.junit.MockitoJUnitRunner;
 
 /** Tests for {@link ReproducibleLayerBuilder}. */
-@RunWith(MockitoJUnitRunner.class)
 public class ReproducibleLayerBuilderTest {
 
   /**
@@ -61,71 +59,89 @@ public class ReproducibleLayerBuilderTest {
   private static void verifyNextTarArchiveEntry(
       TarArchiveInputStream tarArchiveInputStream, String expectedExtractionPath, Path expectedFile)
       throws IOException {
-    TarArchiveEntry header = tarArchiveInputStream.getNextTarEntry();
-    Assert.assertEquals(expectedExtractionPath, header.getName());
+    TarArchiveEntry header = tarArchiveInputStream.getNextEntry();
+    assertThat(header.getName()).isEqualTo(expectedExtractionPath);
 
-    String expectedString = new String(Files.readAllBytes(expectedFile), StandardCharsets.UTF_8);
-
-    String extractedString =
-        CharStreams.toString(new InputStreamReader(tarArchiveInputStream, StandardCharsets.UTF_8));
-
-    Assert.assertEquals(expectedString, extractedString);
+    byte[] expectedBytes = Files.readAllBytes(expectedFile);
+    byte[] extractedBytes = ByteStreams.toByteArray(tarArchiveInputStream);
+    assertThat(extractedBytes).isEqualTo(expectedBytes);
   }
 
-  @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  /**
+   * Verifies that the next {@link TarArchiveEntry} in the {@link TarArchiveInputStream} is a
+   * directory with correct permissions.
+   *
+   * @param tarArchiveInputStream the {@link TarArchiveInputStream} to read from
+   * @param expectedExtractionPath the expected extraction path of the next entry
+   * @throws IOException if an I/O exception occurs
+   */
+  private static void verifyNextTarArchiveEntryIsDirectory(
+      TarArchiveInputStream tarArchiveInputStream, String expectedExtractionPath)
+      throws IOException {
+    TarArchiveEntry extractionPathEntry = tarArchiveInputStream.getNextEntry();
+    assertThat(extractionPathEntry.getName()).isEqualTo(expectedExtractionPath);
+    assertThat(extractionPathEntry.isDirectory()).isTrue();
+    assertThat(extractionPathEntry.getMode()).isEqualTo(TarArchiveEntry.DEFAULT_DIR_MODE);
+  }
+
+  private static FileEntry defaultLayerEntry(Path source, AbsoluteUnixPath destination) {
+    return new FileEntry(
+        source,
+        destination,
+        FileEntriesLayer.DEFAULT_FILE_PERMISSIONS_PROVIDER.get(source, destination),
+        FileEntriesLayer.DEFAULT_MODIFICATION_TIME);
+  }
+
+  @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
   public void testBuild() throws URISyntaxException, IOException {
-    Path layerDirectory = Paths.get(Resources.getResource("layer").toURI());
-    Path blobA = Paths.get(Resources.getResource("blobA").toURI());
+    Path layerDirectory = Paths.get(Resources.getResource("core/layer").toURI());
+    Path blobA = Paths.get(Resources.getResource("core/blobA").toURI());
 
     ReproducibleLayerBuilder layerBuilder =
-        new ReproducibleLayerBuilder()
-            .addFiles(Arrays.asList(layerDirectory, blobA), "extract/here/apple")
-            .addFiles(Collections.singletonList(blobA), "extract/here/banana");
+        new ReproducibleLayerBuilder(
+            ImmutableList.copyOf(
+                FileEntriesLayer.builder()
+                    .addEntryRecursive(
+                        layerDirectory, AbsoluteUnixPath.get("/extract/here/apple/layer"))
+                    .addEntry(blobA, AbsoluteUnixPath.get("/extract/here/apple/blobA"))
+                    .addEntry(blobA, AbsoluteUnixPath.get("/extract/here/banana/blobA"))
+                    .build()
+                    .getEntries()));
 
     // Writes the layer tar to a temporary file.
-    UnwrittenLayer unwrittenLayer = layerBuilder.build();
+    Blob unwrittenBlob = layerBuilder.build();
     Path temporaryFile = temporaryFolder.newFile().toPath();
     try (OutputStream temporaryFileOutputStream =
         new BufferedOutputStream(Files.newOutputStream(temporaryFile))) {
-      unwrittenLayer.getBlob().writeTo(temporaryFileOutputStream);
+      unwrittenBlob.writeTo(temporaryFileOutputStream);
     }
 
     // Reads the file back.
     try (TarArchiveInputStream tarArchiveInputStream =
         new TarArchiveInputStream(Files.newInputStream(temporaryFile))) {
-      // Verifies that blobA was added.
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/");
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/");
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/apple/");
       verifyNextTarArchiveEntry(tarArchiveInputStream, "extract/here/apple/blobA", blobA);
-
-      // Verifies that all the files have been added to the tarball stream.
-      ImmutableList<Path> layerDirectoryPaths =
-          new DirectoryWalker(layerDirectory).filter(path -> !path.equals(layerDirectory)).walk();
-      for (Path path : layerDirectoryPaths) {
-        TarArchiveEntry header = tarArchiveInputStream.getNextTarEntry();
-
-        StringBuilder expectedExtractionPath = new StringBuilder("extract/here/apple");
-        for (Path pathComponent : layerDirectory.getParent().relativize(path)) {
-          expectedExtractionPath.append("/").append(pathComponent);
-        }
-        // Check path-equality because there might be an appended backslash in the header
-        // filename.
-        Assert.assertEquals(
-            Paths.get(expectedExtractionPath.toString()), Paths.get(header.getName()));
-
-        // If is a normal file, checks that the file contents match.
-        if (Files.isRegularFile(path)) {
-          String expectedFileString = new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
-
-          String extractedFileString =
-              CharStreams.toString(
-                  new InputStreamReader(tarArchiveInputStream, StandardCharsets.UTF_8));
-
-          Assert.assertEquals(expectedFileString, extractedFileString);
-        }
-      }
-
-      // Verifies that blobA was added to the other location.
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/apple/layer/");
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/apple/layer/a/");
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/apple/layer/a/b/");
+      verifyNextTarArchiveEntry(
+          tarArchiveInputStream,
+          "extract/here/apple/layer/a/b/bar",
+          Paths.get(Resources.getResource("core/layer/a/b/bar").toURI()));
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/apple/layer/c/");
+      verifyNextTarArchiveEntry(
+          tarArchiveInputStream,
+          "extract/here/apple/layer/c/cat",
+          Paths.get(Resources.getResource("core/layer/c/cat").toURI()));
+      verifyNextTarArchiveEntry(
+          tarArchiveInputStream,
+          "extract/here/apple/layer/foo",
+          Paths.get(Resources.getResource("core/layer/foo").toURI()));
+      verifyNextTarArchiveEntryIsDirectory(tarArchiveInputStream, "extract/here/banana/");
       verifyNextTarArchiveEntry(tarArchiveInputStream, "extract/here/banana/blobA", blobA);
     }
   }
@@ -136,9 +152,7 @@ public class ReproducibleLayerBuilderTest {
     Path root1 = Files.createDirectories(testRoot.resolve("files1"));
     Path root2 = Files.createDirectories(testRoot.resolve("files2"));
 
-    String extractionPath = "/somewhere";
-
-    // TODO: Currently this test only covers variation in order and modified time, even though
+    // TODO: Currently this test only covers variation in order and modification time, even though
     // TODO: the code is designed to clean up userid/groupid, this test does not check that yet.
     String contentA = "abcabc";
     Path fileA1 = createFile(root1, "fileA", contentA, 10000);
@@ -147,37 +161,342 @@ public class ReproducibleLayerBuilderTest {
     Path fileB1 = createFile(root1, "fileB", contentB, 10000);
     Path fileB2 = createFile(root2, "fileB", contentB, 20000);
 
-    // check if modified times are off
-    Assert.assertNotEquals(Files.getLastModifiedTime(fileA1), Files.getLastModifiedTime(fileA2));
-    Assert.assertNotEquals(Files.getLastModifiedTime(fileB1), Files.getLastModifiedTime(fileB2));
+    // check if modification times are off
+    assertThat(Files.getLastModifiedTime(fileA2)).isNotEqualTo(Files.getLastModifiedTime(fileA1));
+    assertThat(Files.getLastModifiedTime(fileB2)).isNotEqualTo(Files.getLastModifiedTime(fileB1));
 
     // create layers of exact same content but ordered differently and with different timestamps
     Blob layer =
-        new ReproducibleLayerBuilder()
-            .addFiles(Arrays.asList(fileA1, fileB1), extractionPath)
-            .build()
-            .getBlob();
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(
+                    defaultLayerEntry(fileA1, AbsoluteUnixPath.get("/somewhere/fileA")),
+                    defaultLayerEntry(fileB1, AbsoluteUnixPath.get("/somewhere/fileB"))))
+            .build();
     Blob reproduced =
-        new ReproducibleLayerBuilder()
-            .addFiles(Arrays.asList(fileB2, fileA2), extractionPath)
-            .build()
-            .getBlob();
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(
+                    defaultLayerEntry(fileB2, AbsoluteUnixPath.get("/somewhere/fileB")),
+                    defaultLayerEntry(fileA2, AbsoluteUnixPath.get("/somewhere/fileA"))))
+            .build();
 
     byte[] layerContent = Blobs.writeToByteArray(layer);
     byte[] reproducedLayerContent = Blobs.writeToByteArray(reproduced);
 
-    Assert.assertThat(layerContent, CoreMatchers.is(reproducedLayerContent));
+    assertThat(layerContent).isEqualTo(reproducedLayerContent);
   }
 
-  private Path createFile(Path root, String filename, String content, long lastModifiedTime)
-      throws IOException {
+  @Test
+  public void testBuild_parentDirBehavior() throws IOException {
+    Path testRoot = temporaryFolder.getRoot().toPath();
 
+    // the path doesn't really matter on source files, but these are structured
+    Path parent = Files.createDirectories(testRoot.resolve("dirA"));
+    Path fileA = Files.createFile(parent.resolve("fileA"));
+    Path ignoredParent = Files.createDirectories(testRoot.resolve("dirB-ignored"));
+    Path fileB = Files.createFile(ignoredParent.resolve("fileB"));
+    Path fileC =
+        Files.createFile(Files.createDirectories(testRoot.resolve("dirC-absent")).resolve("fileC"));
+
+    Blob layer =
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(
+                    new FileEntry(
+                        parent,
+                        AbsoluteUnixPath.get("/root/dirA"),
+                        FilePermissions.fromOctalString("111"),
+                        Instant.ofEpochSecond(10)),
+                    new FileEntry(
+                        fileA,
+                        AbsoluteUnixPath.get("/root/dirA/fileA"),
+                        FilePermissions.fromOctalString("222"),
+                        Instant.ofEpochSecond(20)),
+                    new FileEntry(
+                        fileB,
+                        AbsoluteUnixPath.get("/root/dirB-ignored/fileB"),
+                        FilePermissions.fromOctalString("333"),
+                        Instant.ofEpochSecond(30)),
+                    new FileEntry(
+                        ignoredParent,
+                        AbsoluteUnixPath.get("/root/dirB-ignored"),
+                        FilePermissions.fromOctalString("444"),
+                        Instant.ofEpochSecond(40)),
+                    new FileEntry(
+                        fileC,
+                        AbsoluteUnixPath.get("/root/dirC-absent/file3"),
+                        FilePermissions.fromOctalString("555"),
+                        Instant.ofEpochSecond(50))))
+            .build();
+
+    Path tarFile = temporaryFolder.newFile().toPath();
+    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+      layer.writeTo(out);
+    }
+
+    try (TarArchiveInputStream in = new TarArchiveInputStream(Files.newInputStream(tarFile))) {
+      // root (default folder permissions)
+      TarArchiveEntry root = in.getNextEntry();
+      assertThat(root.getMode()).isEqualTo(040755);
+      assertThat(root.getModTime().toInstant()).isEqualTo(Instant.ofEpochSecond(1));
+      assertThat(root.getLongUserId()).isEqualTo(0);
+      assertThat(root.getLongGroupId()).isEqualTo(0);
+      assertThat(root.getUserName()).isEmpty();
+      assertThat(root.getGroupName()).isEmpty();
+
+      // parentAAA (custom permissions, custom timestamp)
+      TarArchiveEntry rootParentA = in.getNextEntry();
+      assertThat(rootParentA.getMode()).isEqualTo(040111);
+      assertThat(rootParentA.getModTime().toInstant()).isEqualTo(Instant.ofEpochSecond(10));
+      assertThat(rootParentA.getLongUserId()).isEqualTo(0);
+      assertThat(rootParentA.getLongGroupId()).isEqualTo(0);
+      assertThat(rootParentA.getUserName()).isEmpty();
+      assertThat(rootParentA.getGroupName()).isEmpty();
+
+      // skip over fileA
+      in.getNextEntry();
+
+      // parentBBB (default permissions - ignored custom permissions, since fileB added first)
+      TarArchiveEntry rootParentB = in.getNextEntry();
+      // TODO (#1650): we want 040444 here.
+      assertThat(rootParentB.getMode()).isEqualTo(040755);
+      // TODO (#1650): we want Instant.ofEpochSecond(40) here.
+      assertThat(rootParentB.getModTime().toInstant()).isEqualTo(Instant.ofEpochSecond(1));
+      assertThat(rootParentB.getLongUserId()).isEqualTo(0);
+      assertThat(rootParentB.getLongGroupId()).isEqualTo(0);
+      assertThat(rootParentB.getUserName()).isEmpty();
+      assertThat(rootParentB.getGroupName()).isEmpty();
+
+      // skip over fileB
+      in.getNextEntry();
+
+      // parentCCC (default permissions - no entry provided)
+      TarArchiveEntry rootParentC = in.getNextEntry();
+      assertThat(rootParentC.getMode()).isEqualTo(040755);
+      assertThat(rootParentC.getModTime().toInstant()).isEqualTo(Instant.ofEpochSecond(1));
+      assertThat(rootParentC.getLongUserId()).isEqualTo(0);
+      assertThat(rootParentC.getLongGroupId()).isEqualTo(0);
+      assertThat(rootParentC.getUserName()).isEmpty();
+      assertThat(rootParentC.getGroupName()).isEmpty();
+
+      // we don't care about fileC
+    }
+  }
+
+  @Test
+  public void testBuild_timestampDefault() throws IOException {
+    Path file = createFile(temporaryFolder.getRoot().toPath(), "fileA", "some content", 54321);
+
+    Blob blob =
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(defaultLayerEntry(file, AbsoluteUnixPath.get("/fileA"))))
+            .build();
+
+    Path tarFile = temporaryFolder.newFile().toPath();
+    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+      blob.writeTo(out);
+    }
+
+    // Reads the file back.
+    try (TarArchiveInputStream in = new TarArchiveInputStream(Files.newInputStream(tarFile))) {
+      assertThat(in.getNextEntry().getLastModifiedDate().toInstant())
+          .isEqualTo(Instant.EPOCH.plusSeconds(1));
+    }
+  }
+
+  @Test
+  public void testBuild_timestampNonDefault() throws IOException {
+    Path file = createFile(temporaryFolder.getRoot().toPath(), "fileA", "some content", 54321);
+
+    Blob blob =
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(
+                    new FileEntry(
+                        file,
+                        AbsoluteUnixPath.get("/fileA"),
+                        FilePermissions.DEFAULT_FILE_PERMISSIONS,
+                        Instant.ofEpochSecond(123))))
+            .build();
+
+    Path tarFile = temporaryFolder.newFile().toPath();
+    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+      blob.writeTo(out);
+    }
+
+    // Reads the file back.
+    try (TarArchiveInputStream in = new TarArchiveInputStream(Files.newInputStream(tarFile))) {
+      assertThat(in.getNextEntry().getLastModifiedDate().toInstant())
+          .isEqualTo(Instant.EPOCH.plusSeconds(123));
+    }
+  }
+
+  @Test
+  public void testBuild_permissions() throws IOException {
+    Path testRoot = temporaryFolder.getRoot().toPath();
+    Path folder = Files.createDirectories(testRoot.resolve("files1"));
+    Path fileA = createFile(testRoot, "fileA", "abc", 54321);
+    Path fileB = createFile(testRoot, "fileB", "def", 54321);
+
+    Blob blob =
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(
+                    defaultLayerEntry(fileA, AbsoluteUnixPath.get("/somewhere/fileA")),
+                    new FileEntry(
+                        fileB,
+                        AbsoluteUnixPath.get("/somewhere/fileB"),
+                        FilePermissions.fromOctalString("123"),
+                        FileEntriesLayer.DEFAULT_MODIFICATION_TIME),
+                    new FileEntry(
+                        folder,
+                        AbsoluteUnixPath.get("/somewhere/folder"),
+                        FilePermissions.fromOctalString("456"),
+                        FileEntriesLayer.DEFAULT_MODIFICATION_TIME)))
+            .build();
+
+    Path tarFile = temporaryFolder.newFile().toPath();
+    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+      blob.writeTo(out);
+    }
+
+    try (TarArchiveInputStream in = new TarArchiveInputStream(Files.newInputStream(tarFile))) {
+      // Root folder (default folder permissions)
+      assertThat(in.getNextEntry().getMode()).isEqualTo(040755);
+      // fileA (default file permissions)
+      assertThat(in.getNextEntry().getMode()).isEqualTo(0100644);
+      // fileB (custom file permissions)
+      assertThat(in.getNextEntry().getMode()).isEqualTo(0100123);
+      // folder (custom folder permissions)
+      assertThat(in.getNextEntry().getMode()).isEqualTo(040456);
+    }
+  }
+
+  @Test
+  public void testBuild_ownership() throws IOException {
+    Path testRoot = temporaryFolder.getRoot().toPath();
+    Path someFile = createFile(testRoot, "someFile", "content", 54321);
+
+    Blob blob =
+        new ReproducibleLayerBuilder(
+                ImmutableList.of(
+                    defaultLayerEntry(someFile, AbsoluteUnixPath.get("/file1")),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file2"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        ""),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file3"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        ":"),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file4"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        "333:"),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file5"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        ":555"),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file6"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        "333:555"),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file7"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        "user:"),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file8"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        ":group"),
+                    new FileEntry(
+                        someFile,
+                        AbsoluteUnixPath.get("/file9"),
+                        FilePermissions.fromOctalString("123"),
+                        Instant.EPOCH,
+                        "user:group")))
+            .build();
+
+    Path tarFile = temporaryFolder.newFile().toPath();
+    try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tarFile))) {
+      blob.writeTo(out);
+    }
+
+    try (TarArchiveInputStream in = new TarArchiveInputStream(Files.newInputStream(tarFile))) {
+      TarArchiveEntry entry1 = in.getNextEntry();
+      assertThat(entry1.getLongUserId()).isEqualTo(0);
+      assertThat(entry1.getLongGroupId()).isEqualTo(0);
+      assertThat(entry1.getUserName()).isEmpty();
+      assertThat(entry1.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry2 = in.getNextEntry();
+      assertThat(entry2.getLongUserId()).isEqualTo(0);
+      assertThat(entry2.getLongGroupId()).isEqualTo(0);
+      assertThat(entry2.getUserName()).isEmpty();
+      assertThat(entry2.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry3 = in.getNextEntry();
+      assertThat(entry3.getLongUserId()).isEqualTo(0);
+      assertThat(entry3.getLongGroupId()).isEqualTo(0);
+      assertThat(entry3.getUserName()).isEmpty();
+      assertThat(entry3.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry4 = in.getNextEntry();
+      assertThat(entry4.getLongUserId()).isEqualTo(333);
+      assertThat(entry4.getLongGroupId()).isEqualTo(0);
+      assertThat(entry4.getUserName()).isEmpty();
+      assertThat(entry4.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry5 = in.getNextEntry();
+      assertThat(entry5.getLongUserId()).isEqualTo(0);
+      assertThat(entry5.getLongGroupId()).isEqualTo(555);
+      assertThat(entry5.getUserName()).isEmpty();
+      assertThat(entry5.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry6 = in.getNextEntry();
+      assertThat(entry6.getLongUserId()).isEqualTo(333);
+      assertThat(entry6.getLongGroupId()).isEqualTo(555);
+      assertThat(entry6.getUserName()).isEmpty();
+      assertThat(entry6.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry7 = in.getNextEntry();
+      assertThat(entry7.getLongUserId()).isEqualTo(0);
+      assertThat(entry7.getLongGroupId()).isEqualTo(0);
+      assertThat(entry7.getUserName()).isEqualTo("user");
+      assertThat(entry7.getGroupName()).isEmpty();
+
+      TarArchiveEntry entry8 = in.getNextEntry();
+      assertThat(entry8.getLongUserId()).isEqualTo(0);
+      assertThat(entry8.getLongGroupId()).isEqualTo(0);
+      assertThat(entry8.getUserName()).isEmpty();
+      assertThat(entry8.getGroupName()).isEqualTo("group");
+
+      TarArchiveEntry entry9 = in.getNextEntry();
+      assertThat(entry9.getLongUserId()).isEqualTo(0);
+      assertThat(entry9.getLongGroupId()).isEqualTo(0);
+      assertThat(entry9.getUserName()).isEqualTo("user");
+      assertThat(entry9.getGroupName()).isEqualTo("group");
+    }
+  }
+
+  private static Path createFile(Path root, String filename, String content, long modificationTime)
+      throws IOException {
     Path newFile =
         Files.write(
             root.resolve(filename),
             content.getBytes(StandardCharsets.UTF_8),
             StandardOpenOption.CREATE_NEW);
-    Files.setLastModifiedTime(newFile, FileTime.fromMillis(lastModifiedTime));
+    Files.setLastModifiedTime(newFile, FileTime.fromMillis(modificationTime));
     return newFile;
   }
 }

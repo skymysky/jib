@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -18,17 +18,20 @@ package com.google.cloud.tools.jib.registry;
 
 import com.google.api.client.http.GenericUrl;
 import com.google.api.client.http.HttpMethods;
-import com.google.api.client.http.HttpStatusCodes;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
+import com.google.cloud.tools.jib.api.RegistryException;
 import com.google.cloud.tools.jib.blob.Blob;
 import com.google.cloud.tools.jib.http.BlobHttpContent;
 import com.google.cloud.tools.jib.http.Response;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.http.ResponseException;
 import com.google.common.net.MediaType;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Consumer;
 import javax.annotation.Nullable;
 
 /**
@@ -47,9 +50,10 @@ class BlobPusher {
   private final RegistryEndpointRequestProperties registryEndpointRequestProperties;
   private final DescriptorDigest blobDigest;
   private final Blob blob;
+  @Nullable private final String sourceRepository;
 
   /** Initializes the BLOB upload. */
-  private class Initializer implements RegistryEndpointProvider<URL> {
+  private class Initializer implements RegistryEndpointProvider<Optional<URL>> {
 
     @Nullable
     @Override
@@ -63,19 +67,18 @@ class BlobPusher {
     }
 
     /**
-     * @return a URL to continue pushing the BLOB to, or {@code null} if the BLOB already exists on
-     *     the registry
+     * Returns a URL to continue pushing the BLOB to, or {@link Optional#empty()} if the BLOB
+     * already exists on the registry.
      */
-    @Nullable
     @Override
-    public URL handleResponse(Response response) throws RegistryErrorException {
+    public Optional<URL> handleResponse(Response response) throws RegistryErrorException {
       switch (response.getStatusCode()) {
-        case HttpStatusCodes.STATUS_CODE_CREATED:
+        case HttpURLConnection.HTTP_CREATED:
           // The BLOB exists in the registry.
-          return null;
+          return Optional.empty();
 
         case HttpURLConnection.HTTP_ACCEPTED:
-          return getRedirectLocation(response);
+          return Optional.of(getRedirectLocation(response));
 
         default:
           throw buildRegistryErrorException(
@@ -85,11 +88,15 @@ class BlobPusher {
 
     @Override
     public URL getApiRoute(String apiRouteBase) throws MalformedURLException {
-      return new URL(
-          apiRouteBase
-              + registryEndpointRequestProperties.getImageName()
-              + "/blobs/uploads/?mount="
-              + blobDigest);
+      StringBuilder url =
+          new StringBuilder(apiRouteBase)
+              .append(registryEndpointRequestProperties.getImageName())
+              .append("/blobs/uploads/");
+      if (sourceRepository != null) {
+        url.append("?mount=").append(blobDigest).append("&from=").append(sourceRepository);
+      }
+
+      return new URL(url.toString());
     }
 
     @Override
@@ -101,17 +108,24 @@ class BlobPusher {
     public String getActionDescription() {
       return BlobPusher.this.getActionDescription();
     }
+
+    @Override
+    public Optional<URL> handleHttpResponseException(ResponseException responseException)
+        throws ResponseException, RegistryErrorException {
+      throw responseException;
+    }
   }
 
   /** Writes the BLOB content to the upload location. */
   private class Writer implements RegistryEndpointProvider<URL> {
 
     private final URL location;
+    private final Consumer<Long> writtenByteCountListener;
 
     @Nullable
     @Override
     public BlobHttpContent getContent() {
-      return new BlobHttpContent(blob, MediaType.OCTET_STREAM.toString());
+      return new BlobHttpContent(blob, MediaType.OCTET_STREAM.toString(), writtenByteCountListener);
     }
 
     @Override
@@ -119,7 +133,7 @@ class BlobPusher {
       return Collections.emptyList();
     }
 
-    /** @return a URL to continue pushing the BLOB to */
+    /** Returns a URL to continue pushing the BLOB to. */
     @Override
     public URL handleResponse(Response response) throws RegistryException {
       // TODO: Handle 204 No Content
@@ -141,8 +155,15 @@ class BlobPusher {
       return BlobPusher.this.getActionDescription();
     }
 
-    private Writer(URL location) {
+    private Writer(URL location, Consumer<Long> writtenByteCountListener) {
       this.location = location;
+      this.writtenByteCountListener = writtenByteCountListener;
+    }
+
+    @Override
+    public URL handleHttpResponseException(ResponseException responseException)
+        throws ResponseException, RegistryErrorException {
+      throw responseException;
     }
   }
 
@@ -167,7 +188,7 @@ class BlobPusher {
       return null;
     }
 
-    /** @return {@code location} with query parameter 'digest' set to the BLOB's digest */
+    /** Returns {@code location} with query parameter 'digest' set to the BLOB's digest. */
     @Override
     public URL getApiRoute(String apiRouteBase) {
       return new GenericUrl(location).set("digest", blobDigest).toURL();
@@ -186,34 +207,47 @@ class BlobPusher {
     private Committer(URL location) {
       this.location = location;
     }
+
+    @Override
+    public Void handleHttpResponseException(ResponseException responseException)
+        throws ResponseException, RegistryErrorException {
+      throw responseException;
+    }
   }
 
   BlobPusher(
       RegistryEndpointRequestProperties registryEndpointRequestProperties,
       DescriptorDigest blobDigest,
-      Blob blob) {
+      Blob blob,
+      @Nullable String sourceRepository) {
     this.registryEndpointRequestProperties = registryEndpointRequestProperties;
     this.blobDigest = blobDigest;
     this.blob = blob;
+    this.sourceRepository = sourceRepository;
   }
 
   /**
-   * @return a {@link RegistryEndpointProvider} for initializing the BLOB upload with an existence
-   *     check
+   * Returns a {@link RegistryEndpointProvider} for initializing the BLOB upload with an existence
+   * check.
    */
-  RegistryEndpointProvider<URL> initializer() {
+  RegistryEndpointProvider<Optional<URL>> initializer() {
     return new Initializer();
   }
 
   /**
+   * Returns a new Writer.
+   *
    * @param location the upload URL
+   * @param writtenByteCountListener the listener for {@link Blob} push progress (written bytes)
    * @return a {@link RegistryEndpointProvider} for writing the BLOB to an upload location
    */
-  RegistryEndpointProvider<URL> writer(URL location) {
-    return new Writer(location);
+  RegistryEndpointProvider<URL> writer(URL location, Consumer<Long> writtenByteCountListener) {
+    return new Writer(location, writtenByteCountListener);
   }
 
   /**
+   * Returns a new Committer.
+   *
    * @param location the upload URL
    * @return a {@link RegistryEndpointProvider} for committing the written BLOB with its digest
    */
@@ -229,8 +263,8 @@ class BlobPusher {
   }
 
   /**
-   * @return the common action description for {@link Initializer}, {@link Writer}, and {@link
-   *     Committer}
+   * Returns the common action description for {@link Initializer}, {@link Writer}, and {@link
+   * Committer}.
    */
   private String getActionDescription() {
     return "push BLOB for "

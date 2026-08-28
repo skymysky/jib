@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,8 +16,10 @@
 
 package com.google.cloud.tools.jib.registry;
 
+import com.google.cloud.tools.jib.api.RegistryException;
+
 /** Thrown when a pulled BLOB did not have the same digest as requested. */
-public class UnexpectedBlobDigestException extends RegistryException {
+class UnexpectedBlobDigestException extends RegistryException {
 
   UnexpectedBlobDigestException(String message) {
     super(message);

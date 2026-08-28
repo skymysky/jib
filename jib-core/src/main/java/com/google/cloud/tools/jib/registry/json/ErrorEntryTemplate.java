@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -32,6 +32,8 @@ public class ErrorEntryTemplate implements JsonTemplate {
     this.message = message;
   }
 
+  /** Necessary for Jackson to create from JSON. */
+  @SuppressWarnings("unused")
   private ErrorEntryTemplate() {}
 
   @Nullable

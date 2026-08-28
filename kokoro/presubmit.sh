@@ -1,16 +1,29 @@
 #!/bin/bash
 
-set -e
-set -x
+set -o errexit
+set -o xtrace
 
 gcloud components install docker-credential-gcr
-export PATH=$PATH:/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin/
+
+# Docker service does not run by default in Big Sur but can be started with the following commands.
+if [ "${KOKORO_JOB_CLUSTER}" = "MACOS_EXTERNAL" ]; then
+  source github/jib/kokoro/docker_setup_macos.sh
+fi
+
+# In GCP_UBUNTU_DOCKER, the build script runs in a container and requires additional setup
+if [ "${KOKORO_JOB_CLUSTER}" = "GCP_UBUNTU_DOCKER" ]; then
+  source github/jib/kokoro/docker_setup_ubuntu.sh
+fi
+
+# From default hostname, get id of container to exclude
+CONTAINER_ID=$(hostname)
+echo "$CONTAINER_ID"
 
 # Stops any left-over containers.
-docker stop $(docker container ls --quiet) || true
+docker stop $(docker ps --all --quiet | grep -v "$CONTAINER_ID") || true
+docker kill $(docker ps --all --quiet | grep -v "$CONTAINER_ID") || true
 
 cd github/jib
 
-(cd jib-core; ./gradlew clean build integrationTest --info --stacktrace)
-(cd jib-maven-plugin; ./mvnw clean install -B -U -X)
-(cd jib-gradle-plugin; ./gradlew clean build --info --stacktrace)
+# we only run integration tests on jib-core for presubmit
+./gradlew clean build :jib-core:integrationTest --info --stacktrace

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,6 +16,7 @@
 
 package com.google.cloud.tools.jib.blob;
 
+import com.google.cloud.tools.jib.hash.Digests;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -33,16 +34,21 @@ class InputStreamBlob implements Blob {
   }
 
   @Override
-  public BlobDescriptor writeTo(OutputStream outputStream) throws IOException {
+  public BlobDescriptor writeTo(OutputStream outStream) throws IOException {
     // Cannot rewrite.
     if (isWritten) {
       throw new IllegalStateException("Cannot rewrite Blob backed by an InputStream");
     }
-    try (InputStream inputStream = this.inputStream) {
-      return BlobDescriptor.fromPipe(inputStream, outputStream);
+    try (InputStream inStream = this.inputStream) {
+      return Digests.computeDigest(inStream, outStream);
 
     } finally {
       isWritten = true;
     }
+  }
+
+  @Override
+  public boolean isRetryable() {
+    return false;
   }
 }

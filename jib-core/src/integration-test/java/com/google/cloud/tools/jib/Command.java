@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import javax.annotation.Nullable;
@@ -29,10 +30,21 @@ import javax.annotation.Nullable;
 public class Command {
 
   private final List<String> command;
+  private Path workingDir = null;
 
   /** Instantiate with a command. */
   public Command(String... command) {
     this.command = Arrays.asList(command);
+  }
+
+  /** Instantiate with a command. */
+  public Command(List<String> command) {
+    this.command = command;
+  }
+
+  public Command setWorkingDir(Path workingDir) {
+    this.workingDir = workingDir;
+    return this;
   }
 
   /** Runs the command. */
@@ -42,7 +54,11 @@ public class Command {
 
   /** Runs the command and pipes in {@code stdin}. */
   public String run(@Nullable byte[] stdin) throws IOException, InterruptedException {
-    Process process = new ProcessBuilder(command).start();
+    ProcessBuilder processBuilder = new ProcessBuilder(command);
+    if (workingDir != null) {
+      processBuilder.directory(workingDir.toFile());
+    }
+    Process process = processBuilder.start();
 
     if (stdin != null) {
       // Write out stdin.
@@ -57,7 +73,10 @@ public class Command {
       String output = CharStreams.toString(inputStreamReader);
 
       if (process.waitFor() != 0) {
-        throw new RuntimeException("Command '" + String.join(" ", command) + "' failed");
+        String stderr =
+            CharStreams.toString(
+                new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8));
+        throw new RuntimeException("Command '" + String.join(" ", command) + "' failed: " + stderr);
       }
 
       return output;

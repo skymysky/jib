@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -19,7 +19,7 @@ package com.google.cloud.tools.jib.image.json;
 import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
-import com.google.cloud.tools.jib.image.DescriptorDigest;
+import com.google.cloud.tools.jib.api.DescriptorDigest;
 import java.io.IOException;
 
 /** Serializes a {@link DescriptorDigest} into JSON element. */

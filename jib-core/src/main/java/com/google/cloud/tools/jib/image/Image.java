@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,32 +16,94 @@
 
 package com.google.cloud.tools.jib.image;
 
+import com.google.cloud.tools.jib.api.buildplan.AbsoluteUnixPath;
+import com.google.cloud.tools.jib.api.buildplan.Port;
+import com.google.cloud.tools.jib.configuration.DockerHealthCheck;
+import com.google.cloud.tools.jib.image.json.HistoryEntry;
+import com.google.cloud.tools.jib.image.json.ManifestTemplate;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import javax.annotation.Nullable;
 
 /** Represents an image. */
-public class Image<T extends Layer> {
+public class Image {
 
   /** Builds the immutable {@link Image}. */
-  public static class Builder<T extends Layer> {
+  public static class Builder {
 
-    private final ImageLayers.Builder<T> imageLayersBuilder = ImageLayers.builder();
-    private final ImmutableList.Builder<String> environmentBuilder = ImmutableList.builder();
+    private final Class<? extends ManifestTemplate> imageFormat;
+    private final ImmutableList.Builder<Layer> imageLayersBuilder = ImmutableList.builder();
+    private final ImmutableList.Builder<HistoryEntry> historyBuilder = ImmutableList.builder();
 
-    private ImmutableList<String> entrypoint = ImmutableList.of();
-    private ImmutableList<String> javaArguments = ImmutableList.of();
-    private ImmutableList<String> exposedPorts = ImmutableList.of();
+    // Don't use ImmutableMap.Builder because it does not allow for replacing existing keys with new
+    // values.
+    private final Map<String, String> environmentBuilder = new HashMap<>();
+    private final Map<String, String> labelsBuilder = new HashMap<>();
+    private final Set<Port> exposedPortsBuilder = new HashSet<>();
+    private final Set<AbsoluteUnixPath> volumesBuilder = new HashSet<>();
+
+    @Nullable private Instant created;
+    private String architecture = "amd64";
+    private String os = "linux";
+    @Nullable private ImmutableList<String> entrypoint;
+    @Nullable private ImmutableList<String> programArguments;
+    @Nullable private DockerHealthCheck healthCheck;
+    @Nullable private String workingDirectory;
+    @Nullable private String user;
+
+    private Builder(Class<? extends ManifestTemplate> imageFormat) {
+      this.imageFormat = imageFormat;
+    }
 
     /**
-     * Sets the environment with a map from environment variable names to values.
+     * Sets the image creation time.
+     *
+     * @param created the creation time
+     * @return this
+     */
+    public Builder setCreated(Instant created) {
+      this.created = created;
+      return this;
+    }
+
+    /**
+     * Sets the image architecture.
+     *
+     * @param architecture the architecture
+     * @return this
+     */
+    public Builder setArchitecture(String architecture) {
+      this.architecture = architecture;
+      return this;
+    }
+
+    /**
+     * Sets the image operating system.
+     *
+     * @param os the operating system
+     * @return this
+     */
+    public Builder setOs(String os) {
+      this.os = os;
+      return this;
+    }
+
+    /**
+     * Adds a map of environment variables to the current map.
      *
      * @param environment the map of environment variables
      * @return this
      */
-    public Builder<T> setEnvironment(Map<String, String> environment) {
-      for (Map.Entry<String, String> environmentVariable : environment.entrySet()) {
-        setEnvironmentVariable(environmentVariable.getKey(), environmentVariable.getValue());
+    public Builder addEnvironment(@Nullable Map<String, String> environment) {
+      if (environment != null) {
+        environmentBuilder.putAll(environment);
       }
       return this;
     }
@@ -53,19 +115,8 @@ public class Image<T extends Layer> {
      * @param value the value to set it to
      * @return this
      */
-    public Builder<T> setEnvironmentVariable(String name, String value) {
-      environmentBuilder.add(name + "=" + value);
-      return this;
-    }
-
-    /**
-     * Adds an environment variable definition in the format {@code NAME=VALUE}.
-     *
-     * @param environmentVariableDefinition the definition to add
-     * @return this
-     */
-    public Builder<T> addEnvironmentVariableDefinition(String environmentVariableDefinition) {
-      environmentBuilder.add(environmentVariableDefinition);
+    public Builder addEnvironmentVariable(String name, String value) {
+      environmentBuilder.put(name, value);
       return this;
     }
 
@@ -75,31 +126,104 @@ public class Image<T extends Layer> {
      * @param entrypoint the list of entrypoint tokens
      * @return this
      */
-    public Builder<T> setEntrypoint(List<String> entrypoint) {
-      this.entrypoint = ImmutableList.copyOf(entrypoint);
+    public Builder setEntrypoint(@Nullable List<String> entrypoint) {
+      this.entrypoint = (entrypoint == null) ? null : ImmutableList.copyOf(entrypoint);
       return this;
     }
 
     /**
-     * Sets the items in the "Cmd" field in the container configuration (i.e. the main args).
+     * Sets the user/group to run the container as.
      *
-     * @param javaArguments the list of main args to add
+     * @param user the username/UID and optionally the groupname/GID
      * @return this
      */
-    public Builder<T> setJavaArguments(List<String> javaArguments) {
-      this.javaArguments = ImmutableList.copyOf(javaArguments);
+    public Builder setUser(@Nullable String user) {
+      this.user = user;
       return this;
     }
 
     /**
-     * Sets the items in the "ExposedPorts" field in the container configuration.
+     * Sets the items in the "Cmd" field in the container configuration.
      *
-     * @param exposedPorts the map of exposed ports to add, with the key in the format it would
-     *     appear in the configuration json (e.g. "portNum/tcp")
+     * @param programArguments the list of arguments to append to the image entrypoint
      * @return this
      */
-    public Builder<T> setExposedPorts(ImmutableList<String> exposedPorts) {
-      this.exposedPorts = exposedPorts;
+    public Builder setProgramArguments(@Nullable List<String> programArguments) {
+      this.programArguments =
+          (programArguments == null) ? null : ImmutableList.copyOf(programArguments);
+      return this;
+    }
+
+    /**
+     * Sets the container's healthcheck configuration.
+     *
+     * @param healthCheck the healthcheck configuration
+     * @return this
+     */
+    public Builder setHealthCheck(@Nullable DockerHealthCheck healthCheck) {
+      this.healthCheck = healthCheck;
+      return this;
+    }
+
+    /**
+     * Adds items to the "ExposedPorts" field in the container configuration.
+     *
+     * @param exposedPorts the exposed ports to add
+     * @return this
+     */
+    public Builder addExposedPorts(@Nullable Set<Port> exposedPorts) {
+      if (exposedPorts != null) {
+        exposedPortsBuilder.addAll(exposedPorts);
+      }
+      return this;
+    }
+
+    /**
+     * Adds items to the "Volumes" field in the container configuration.
+     *
+     * @param volumes the directories to create volumes
+     * @return this
+     */
+    public Builder addVolumes(@Nullable Set<AbsoluteUnixPath> volumes) {
+      if (volumes != null) {
+        volumesBuilder.addAll(ImmutableSet.copyOf(volumes));
+      }
+      return this;
+    }
+
+    /**
+     * Adds items to the "Labels" field in the container configuration.
+     *
+     * @param labels the map of labels to add
+     * @return this
+     */
+    public Builder addLabels(@Nullable Map<String, String> labels) {
+      if (labels != null) {
+        labelsBuilder.putAll(labels);
+      }
+      return this;
+    }
+
+    /**
+     * Adds an item to the "Labels" field in the container configuration.
+     *
+     * @param name the name of the label
+     * @param value the value of the label
+     * @return this
+     */
+    public Builder addLabel(String name, String value) {
+      labelsBuilder.put(name, value);
+      return this;
+    }
+
+    /**
+     * Sets the item in the "WorkingDir" field in the container configuration.
+     *
+     * @param workingDirectory the working directory
+     * @return this
+     */
+    public Builder setWorkingDirectory(@Nullable String workingDirectory) {
+      this.workingDirectory = workingDirectory;
       return this;
     }
 
@@ -110,70 +234,196 @@ public class Image<T extends Layer> {
      * @return this
      * @throws LayerPropertyNotFoundException if adding the layer fails
      */
-    public Builder<T> addLayer(T layer) throws LayerPropertyNotFoundException {
+    public Builder addLayer(Layer layer) throws LayerPropertyNotFoundException {
       imageLayersBuilder.add(layer);
       return this;
     }
 
-    public Image<T> build() {
-      return new Image<>(
+    /**
+     * Adds a history element to the image.
+     *
+     * @param history the history object to add
+     * @return this
+     */
+    public Builder addHistory(HistoryEntry history) {
+      historyBuilder.add(history);
+      return this;
+    }
+
+    /**
+     * Create an {@link Image} instance.
+     *
+     * @return a new {@link Image} instance
+     */
+    public Image build() {
+      return new Image(
+          imageFormat,
+          created,
+          architecture,
+          os,
           imageLayersBuilder.build(),
-          environmentBuilder.build(),
-          ImmutableList.copyOf(entrypoint),
-          ImmutableList.copyOf(javaArguments),
-          exposedPorts);
+          historyBuilder.build(),
+          ImmutableMap.copyOf(environmentBuilder),
+          entrypoint,
+          programArguments,
+          healthCheck,
+          ImmutableSet.copyOf(exposedPortsBuilder),
+          ImmutableSet.copyOf(volumesBuilder),
+          ImmutableMap.copyOf(labelsBuilder),
+          workingDirectory,
+          user);
     }
   }
 
-  public static <T extends Layer> Builder<T> builder() {
-    return new Builder<>();
+  public static Builder builder(Class<? extends ManifestTemplate> imageFormat) {
+    return new Builder(imageFormat);
   }
+
+  /** The image format. */
+  private final Class<? extends ManifestTemplate> imageFormat;
+
+  /** The image creation time. */
+  @Nullable private final Instant created;
+
+  /** The image architecture. */
+  private final String architecture;
+
+  /** The image operating system. */
+  private final String os;
 
   /** The layers of the image, in the order in which they are applied. */
-  private final ImageLayers<T> layers;
+  private final ImmutableList<Layer> layers;
+
+  /** The commands used to build each layer of the image. */
+  private final ImmutableList<HistoryEntry> history;
 
   /** Environment variable definitions for running the image, in the format {@code NAME=VALUE}. */
-  private final ImmutableList<String> environmentBuilder;
+  @Nullable private final ImmutableMap<String, String> environment;
 
   /** Initial command to run when running the image. */
-  private final ImmutableList<String> entrypoint;
+  @Nullable private final ImmutableList<String> entrypoint;
 
-  /** Arguments to pass into main when running the image. */
-  private final ImmutableList<String> javaArguments;
+  /** Arguments to append to the image entrypoint when running the image. */
+  @Nullable private final ImmutableList<String> programArguments;
+
+  /** Healthcheck configuration. */
+  @Nullable private final DockerHealthCheck healthCheck;
 
   /** Ports that the container listens on. */
-  private final ImmutableList<String> exposedPorts;
+  @Nullable private final ImmutableSet<Port> exposedPorts;
+
+  /** Directories to mount as volumes. */
+  @Nullable private final ImmutableSet<AbsoluteUnixPath> volumes;
+
+  /** Labels on the container configuration. */
+  @Nullable private final ImmutableMap<String, String> labels;
+
+  /** Working directory on the container configuration. */
+  @Nullable private final String workingDirectory;
+
+  /** User on the container configuration. */
+  @Nullable private final String user;
 
   private Image(
-      ImageLayers<T> layers,
-      ImmutableList<String> environment,
-      ImmutableList<String> entrypoint,
-      ImmutableList<String> javaArguments,
-      ImmutableList<String> exposedPorts) {
+      Class<? extends ManifestTemplate> imageFormat,
+      @Nullable Instant created,
+      String architecture,
+      String os,
+      ImmutableList<Layer> layers,
+      ImmutableList<HistoryEntry> history,
+      @Nullable ImmutableMap<String, String> environment,
+      @Nullable ImmutableList<String> entrypoint,
+      @Nullable ImmutableList<String> programArguments,
+      @Nullable DockerHealthCheck healthCheck,
+      @Nullable ImmutableSet<Port> exposedPorts,
+      @Nullable ImmutableSet<AbsoluteUnixPath> volumes,
+      @Nullable ImmutableMap<String, String> labels,
+      @Nullable String workingDirectory,
+      @Nullable String user) {
+    this.imageFormat = imageFormat;
+    this.created = created;
+    this.architecture = architecture;
+    this.os = os;
     this.layers = layers;
-    this.environmentBuilder = environment;
+    this.history = history;
+    this.environment = environment;
     this.entrypoint = entrypoint;
-    this.javaArguments = javaArguments;
+    this.programArguments = programArguments;
+    this.healthCheck = healthCheck;
     this.exposedPorts = exposedPorts;
+    this.volumes = volumes;
+    this.labels = labels;
+    this.workingDirectory = workingDirectory;
+    this.user = user;
   }
 
-  public ImmutableList<String> getEnvironment() {
-    return environmentBuilder;
+  public Class<? extends ManifestTemplate> getImageFormat() {
+    return imageFormat;
   }
 
+  @Nullable
+  public Instant getCreated() {
+    return created;
+  }
+
+  public String getArchitecture() {
+    return architecture;
+  }
+
+  public String getOs() {
+    return os;
+  }
+
+  @Nullable
+  public ImmutableMap<String, String> getEnvironment() {
+    return environment;
+  }
+
+  @Nullable
   public ImmutableList<String> getEntrypoint() {
     return entrypoint;
   }
 
-  public ImmutableList<String> getJavaArguments() {
-    return javaArguments;
+  @Nullable
+  public ImmutableList<String> getProgramArguments() {
+    return programArguments;
   }
 
-  public ImmutableList<String> getExposedPorts() {
+  @Nullable
+  public DockerHealthCheck getHealthCheck() {
+    return healthCheck;
+  }
+
+  @Nullable
+  public ImmutableSet<Port> getExposedPorts() {
     return exposedPorts;
   }
 
-  public ImmutableList<T> getLayers() {
-    return layers.getLayers();
+  @Nullable
+  public ImmutableSet<AbsoluteUnixPath> getVolumes() {
+    return volumes;
+  }
+
+  @Nullable
+  public ImmutableMap<String, String> getLabels() {
+    return labels;
+  }
+
+  @Nullable
+  public String getWorkingDirectory() {
+    return workingDirectory;
+  }
+
+  @Nullable
+  public String getUser() {
+    return user;
+  }
+
+  public ImmutableList<Layer> getLayers() {
+    return layers;
+  }
+
+  public ImmutableList<HistoryEntry> getHistory() {
+    return history;
   }
 }

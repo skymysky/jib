@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -16,9 +16,10 @@
 
 package com.google.cloud.tools.jib.registry;
 
-import com.google.api.client.http.HttpResponseException;
+import com.google.cloud.tools.jib.api.RegistryException;
 import com.google.cloud.tools.jib.http.BlobHttpContent;
 import com.google.cloud.tools.jib.http.Response;
+import com.google.cloud.tools.jib.http.ResponseException;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -32,42 +33,42 @@ import javax.annotation.Nullable;
  */
 interface RegistryEndpointProvider<T> {
 
-  /** @return the HTTP method to send the request with */
+  /** Returns the HTTP method to send the request with. */
   String getHttpMethod();
 
   /**
+   * Returns the registry endpoint URL.
+   *
    * @param apiRouteBase the registry's base URL (for example, {@code https://gcr.io/v2/})
    * @return the registry endpoint URL
    */
   URL getApiRoute(String apiRouteBase) throws MalformedURLException;
 
-  /** @return the {@link BlobHttpContent} to send as the request body */
+  /** Returns the {@link BlobHttpContent} to send as the request body. */
   @Nullable
   BlobHttpContent getContent();
 
-  /** @return a list of MIME types to pass as an HTTP {@code Accept} header */
+  /** Returns a list of MIME types to pass as an HTTP {@code Accept} header. */
   List<String> getAccept();
 
   /** Handles the response specific to the registry action. */
-  @Nullable
   T handleResponse(Response response) throws IOException, RegistryException;
 
   /**
-   * Handles an {@link HttpResponseException} that occurs.
+   * Handles an {@link ResponseException} that occurs. Implementation must re-throw the given
+   * exception if it did not conclusively handled the response exception.
    *
-   * @param httpResponseException the {@link HttpResponseException} to handle
-   * @throws HttpResponseException {@code httpResponseException} if {@code httpResponseException}
-   *     could not be handled
+   * @param responseException the {@link ResponseException} to handle
+   * @throws ResponseException {@code responseException} if {@code responseException} could not be
+   *     handled
+   * @throws RegistryErrorException if there is an error with a remote registry
    */
-  @Nullable
-  default T handleHttpResponseException(HttpResponseException httpResponseException)
-      throws HttpResponseException, RegistryErrorException {
-    throw httpResponseException;
-  }
+  T handleHttpResponseException(ResponseException responseException)
+      throws ResponseException, RegistryErrorException;
 
   /**
-   * @return a description of the registry action performed, used in error messages to describe the
-   *     action that failed
+   * Returns description of the registry action performed, used in error messages to describe the
+   * action that failed.
    */
   String getActionDescription();
 }

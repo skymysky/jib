@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Google LLC. All rights reserved.
+ * Copyright 2017 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -18,14 +18,14 @@ package com.google.cloud.tools.jib.http;
 
 import com.google.api.client.http.GenericUrl;
 import com.google.api.client.http.HttpResponse;
-import com.google.cloud.tools.jib.blob.Blob;
-import com.google.cloud.tools.jib.blob.Blobs;
 import com.google.common.net.HttpHeaders;
+import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 
 /** Holds an HTTP response. */
-public class Response {
+public class Response implements Closeable {
 
   private final HttpResponse httpResponse;
 
@@ -33,12 +33,18 @@ public class Response {
     this.httpResponse = httpResponse;
   }
 
-  /** @return the HTTP status code of the response */
+  /**
+   * Returns the HTTP status code of the response.
+   *
+   * @return the HTTP status code of the response
+   */
   public int getStatusCode() {
     return httpResponse.getStatusCode();
   }
 
   /**
+   * Returns a list of the header string values for the given header name.
+   *
    * @param headerName the header name
    * @return a list of headers in the response
    */
@@ -47,6 +53,8 @@ public class Response {
   }
 
   /**
+   * Returns the content length from the header.
+   *
    * @return the first {@code Content-Length} header, or {@code -1} if not found
    * @throws NumberFormatException if parsing the content length header fails
    */
@@ -65,15 +73,26 @@ public class Response {
   }
 
   /**
-   * @return the HTTP response body as a {@link Blob}.
+   * Returns the content of the HTTP response.
+   *
+   * @return the HTTP response body as an {@link InputStream}.
    * @throws IOException if getting the HTTP response content fails.
    */
-  public Blob getBody() throws IOException {
-    return Blobs.from(httpResponse.getContent());
+  public InputStream getBody() throws IOException {
+    return httpResponse.getContent();
   }
 
-  /** @return the original request URL */
+  /**
+   * Returns the original request URL.
+   *
+   * @return the original request URL
+   */
   public GenericUrl getRequestUrl() {
     return httpResponse.getRequest().getUrl();
+  }
+
+  @Override
+  public void close() throws IOException {
+    httpResponse.disconnect();
   }
 }

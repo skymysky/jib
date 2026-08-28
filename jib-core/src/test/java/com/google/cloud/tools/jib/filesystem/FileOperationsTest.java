@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Google LLC. All rights reserved.
+ * Copyright 2018 Google LLC.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
@@ -31,16 +31,16 @@ import org.junit.rules.TemporaryFolder;
 /** Tests for {@link FileOperations}. */
 public class FileOperationsTest {
 
-  @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
   @Test
   public void testCopy() throws IOException, URISyntaxException {
     Path destDir = temporaryFolder.newFolder().toPath();
     Path libraryA =
-        Paths.get(Resources.getResource("application/dependencies/libraryA.jar").toURI());
+        Paths.get(Resources.getResource("core/application/dependencies/libraryA.jar").toURI());
     Path libraryB =
-        Paths.get(Resources.getResource("application/dependencies/libraryB.jar").toURI());
-    Path dirLayer = Paths.get(Resources.getResource("layer").toURI());
+        Paths.get(Resources.getResource("core/application/dependencies/libraryB.jar").toURI());
+    Path dirLayer = Paths.get(Resources.getResource("core/layer").toURI());
 
     FileOperations.copy(ImmutableList.of(libraryA, libraryB, dirLayer), destDir);
 
